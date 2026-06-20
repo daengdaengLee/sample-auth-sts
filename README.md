@@ -5,7 +5,7 @@
 ## 개요
 
 이 프로젝트는 워크로드가 이미 보유한 AWS IAM 신원을 AWS STS의 `GetCallerIdentity`로 증명(Proof of Possession)하여, 별도의 인증 시스템에 연합(federate)하는 방식을 보여주는 샘플입니다.
-레퍼런스는 HashiCorp Vault의 AWS(IAM) auth method와 AWS IAM Authenticator for Kubernetes이며, 둘 다 동일한 PoP 기반 Workload Identity Federation 구현입니다.
+레퍼런스는 HashiCorp Vault의 AWS(IAM) auth method와 AWS IAM Authenticator for Kubernetes이며, 둘 다 같은 PoP 기반 Workload Identity Federation 방식을 따릅니다.
 
 ### Workload Identity Federation 란
 
