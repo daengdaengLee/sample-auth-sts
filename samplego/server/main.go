@@ -27,7 +27,10 @@ const (
 )
 
 func main() {
-	logger := newLogger()
+	// slog 는 서버 전반에서 사용하는 표준 구조화 로거다.
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
 	slog.SetDefault(logger)
 
 	if err := run(context.Background(), logger); err != nil {
@@ -43,7 +46,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	addr := listenAddr()
+	// LISTEN_ADDR 환경변수에서 리슨 주소를 얻고, 없으면 defaultListenAddr 로 폴백한다.
+	addr := defaultListenAddr
+	if v := os.Getenv("LISTEN_ADDR"); v != "" {
+		addr = v
+	}
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -79,23 +86,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	logger.Info("server stopped")
 	return nil
-}
-
-// newLogger 는 애플리케이션 로거를 만든다. slog 는 서버 전반에서 사용하는
-// 표준 구조화 로거다.
-func newLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-}
-
-// listenAddr 은 LISTEN_ADDR 환경변수에서 서버 리슨 주소를 얻고, 없으면
-// defaultListenAddr 로 폴백한다.
-func listenAddr() string {
-	if addr := os.Getenv("LISTEN_ADDR"); addr != "" {
-		return addr
-	}
-	return defaultListenAddr
 }
 
 // newRouter 는 slog 기반 요청 로거, 패닉 복구, 헬스체크 라우트를 갖춘 gin
