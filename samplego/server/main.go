@@ -102,6 +102,12 @@ func listenAddr() string {
 // recovery, and the health-check route.
 func newRouter(logger *slog.Logger) *gin.Engine {
 	engine := gin.New()
+
+	// Trust only the direct TCP peer: ignore X-Forwarded-For/X-Real-IP so the
+	// logged client IP cannot be spoofed by clients. If this server is later
+	// placed behind a reverse proxy, configure trusted proxy CIDRs instead.
+	engine.ForwardedByClientIP = false
+
 	engine.Use(requestLogger(logger), gin.Recovery())
 
 	engine.GET("/healthz", func(c *gin.Context) {
