@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Compiled server binary (built by `go build` in samplego/server)
+/samplego/server/server
+
 # Test binary, built with `go test -c`
 *.test
 
