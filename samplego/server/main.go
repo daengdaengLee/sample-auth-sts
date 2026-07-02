@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/inbound"
 )
 
 const (
@@ -54,7 +54,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: newRouter(logger),
+		Handler: inbound.NewRouter(logger),
 	}
 
 	// 메인 흐름이 신호 또는 시작/서빙 에러 중 하나를 기다릴 수 있도록
@@ -86,41 +86,4 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	logger.Info("server stopped")
 	return nil
-}
-
-// newRouter 는 slog 기반 요청 로거, 패닉 복구, 헬스체크 라우트를 갖춘 gin
-// 엔진을 만든다.
-func newRouter(logger *slog.Logger) *gin.Engine {
-	engine := gin.New()
-
-	// 직접 연결된 TCP 피어만 신뢰한다: X-Forwarded-For/X-Real-IP 를 무시해
-	// 로그에 남는 클라이언트 IP 를 클라이언트가 위조하지 못하게 한다. 이후 이
-	// 서버를 리버스 프록시 뒤에 두게 되면 신뢰할 프록시 CIDR 을 설정한다.
-	engine.ForwardedByClientIP = false
-
-	engine.Use(requestLogger(logger), gin.Recovery())
-
-	engine.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-
-	return engine
-}
-
-// requestLogger 는 slog 를 통해 요청당 한 줄씩 로그를 남겨, 서버의 나머지
-// 부분과 로그 출력을 일관되게 유지한다.
-func requestLogger(logger *slog.Logger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-
-		c.Next()
-
-		logger.Info("request",
-			slog.String("method", c.Request.Method),
-			slog.String("path", c.Request.URL.Path),
-			slog.Int("status", c.Writer.Status()),
-			slog.Duration("latency", time.Since(start)),
-			slog.String("client_ip", c.ClientIP()),
-		)
-	}
 }
