@@ -59,6 +59,11 @@ func (h ContextHandler) WithGroup(name string) slog.Handler {
 
 // New 는 텍스트 핸들러를 ContextHandler 로 감싼 표준 로거를 만든다. 서버 전반에서
 // 이 로거를 쓰면 context 에 실린 요청 범위 속성이 모든 로그에 자동으로 붙는다.
+//
+// 컨벤션: 이 로거에는 WithGroup 을 쓰지 말 것. context 속성은 로그 시점에 레코드로
+// 추가되므로, 그룹이 열린 상태에서 로깅하면 request_id 같은 상관관계 속성이 그 그룹
+// 안으로 중첩된다(예: g.request_id). 필드 묶음이 필요하면 호출 시점에 inline
+// slog.Group(...) 을 쓴다. With(...) 로 속성을 더하는 것은 최상위로 남으므로 무방하다.
 func New(w io.Writer, level slog.Leveler) *slog.Logger {
 	base := slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
 	return slog.New(ContextHandler{Handler: base})
