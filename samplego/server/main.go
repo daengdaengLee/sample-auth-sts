@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/inbound"
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/internal/logging"
 )
 
 const (
@@ -27,10 +28,9 @@ const (
 )
 
 func main() {
-	// slog 는 서버 전반에서 사용하는 표준 구조화 로거다.
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	// logging.New 는 텍스트 핸들러를 ContextHandler 로 감싸, context 에 실린 요청
+	// 범위 속성(request_id 등)을 모든 로그에 자동으로 붙여주는 표준 로거를 만든다.
+	logger := logging.New(os.Stdout, slog.LevelInfo)
 	slog.SetDefault(logger)
 
 	if err := run(context.Background(), logger); err != nil {

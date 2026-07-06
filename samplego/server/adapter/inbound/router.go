@@ -22,7 +22,9 @@ func NewRouter(logger *slog.Logger) *gin.Engine {
 	// 서버를 리버스 프록시 뒤에 두게 되면 신뢰할 프록시 CIDR 을 설정한다.
 	engine.ForwardedByClientIP = false
 
-	engine.Use(requestLogger(logger), gin.Recovery())
+	// RequestID 를 가장 앞에 둬, 접근 로그와 각 핸들러 로그가 동일한 request_id 를
+	// 공유하도록 한다.
+	engine.Use(RequestID(), requestLogger(logger), gin.Recovery())
 
 	h := NewHandler(logger)
 
@@ -57,11 +59,13 @@ func (h *Handler) Health(c *gin.Context) {
 // 원본 서명 요청을 보존한 뒤 인바운드 포트를 호출하게 된다. 코어가 붙기 전까지는
 // 501 스텁이다.
 func (h *Handler) Authenticate(c *gin.Context) {
+	h.logger.InfoContext(c.Request.Context(), "authenticate 요청 수신 (미구현)")
 	c.JSON(http.StatusNotImplemented, gin.H{"status": "not_implemented"})
 }
 
 // Verify 는 서버가 발급한 JWT 의 유효성(서명/만료)과 클레임을 검증하는
 // 엔드포인트다. 검증 로직이 붙기 전까지는 501 스텁이다.
 func (h *Handler) Verify(c *gin.Context) {
+	h.logger.InfoContext(c.Request.Context(), "verify 요청 수신 (미구현)")
 	c.JSON(http.StatusNotImplemented, gin.H{"status": "not_implemented"})
 }
