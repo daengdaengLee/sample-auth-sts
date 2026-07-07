@@ -36,6 +36,17 @@ const errorBody = `<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-1
   <RequestId>01234567-89ab-cdef-0123-456789abcdef</RequestId>
 </ErrorResponse>`
 
+// throttleBody 는 STS 스로틀링 에러 응답(XML) 샘플이다. HTTP 400 으로 오지만 서명이
+// 무효한 게 아니라 일시 상태다.
+const throttleBody = `<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <Error>
+    <Type>Sender</Type>
+    <Code>Throttling</Code>
+    <Message>Rate exceeded</Message>
+  </Error>
+  <RequestId>01234567-89ab-cdef-0123-456789abcdef</RequestId>
+</ErrorResponse>`
+
 // preservedFor 는 주어진 대상 URL 로 향하는 GetCallerIdentity 원본 요청 대역을 만든다.
 func preservedFor(target string) domain.PreservedRequest {
 	return domain.PreservedRequest{
@@ -53,9 +64,9 @@ func preservedFor(target string) domain.PreservedRequest {
 }
 
 // TestVerifyIdentity_success 는 정상 응답에서 ARN/Account/UserID 가 정확히 파싱되는지
-// 확인한다.
+// 확인한다. https 만 허용하므로 TLS 테스트 서버를 쓴다.
 func TestVerifyIdentity_success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/xml")
 		io.WriteString(w, successBody)
 	}))
@@ -79,12 +90,14 @@ func TestVerifyIdentity_success(t *testing.T) {
 }
 
 // TestVerifyIdentity_forwardsOriginal 은 보존된 원본 요청이 재구성 없이 그대로 STS 에
-// 도달하는지(메서드/경로/헤더/바디, 특히 Host 헤더와 서명 헤더 보존) 확인한다.
+// 도달하는지(메서드/경로/쿼리/헤더/바디, 특히 Host 헤더와 서명 헤더 보존) 확인한다.
 func TestVerifyIdentity_forwardsOriginal(t *testing.T) {
-	var gotMethod, gotAuth, gotBinding, gotHost string
+	var gotMethod, gotPath, gotQuery, gotAuth, gotBinding, gotHost string
 	var gotBody []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
 		gotAuth = r.Header.Get("Authorization")
 		gotBinding = r.Header.Get("X-Server-Binding")
 		gotHost = r.Host
@@ -94,7 +107,9 @@ func TestVerifyIdentity_forwardsOriginal(t *testing.T) {
 	defer srv.Close()
 
 	v := New(srv.Client(), []string{srv.URL})
-	req := preservedFor(srv.URL)
+	// 경로/쿼리가 그대로 전달되는지 보려고 대상 URL 에 둘 다 실어 보낸다. 허용 목록
+	// 대조는 scheme+host+port 기준이라 경로가 있어도 매칭된다.
+	req := preservedFor(srv.URL + "/some/path?Foo=bar&Baz=qux")
 
 	if _, err := v.VerifyIdentity(context.Background(), req); err != nil {
 		t.Fatalf("VerifyIdentity() 에러: %v", err)
@@ -102,6 +117,12 @@ func TestVerifyIdentity_forwardsOriginal(t *testing.T) {
 
 	if gotMethod != http.MethodPost {
 		t.Errorf("method=%q, want POST", gotMethod)
+	}
+	if gotPath != "/some/path" {
+		t.Errorf("path=%q, want /some/path (경로가 보존되지 않음)", gotPath)
+	}
+	if gotQuery != "Foo=bar&Baz=qux" {
+		t.Errorf("query=%q, want Foo=bar&Baz=qux (쿼리가 보존되지 않음)", gotQuery)
 	}
 	if gotAuth != req.Header["Authorization"][0] {
 		t.Errorf("Authorization 헤더가 보존되지 않음: %q", gotAuth)
@@ -121,7 +142,7 @@ func TestVerifyIdentity_forwardsOriginal(t *testing.T) {
 // 없이 검증 실패 에러를 반환하는지 확인한다.
 func TestVerifyIdentity_endpointNotAllowed(t *testing.T) {
 	var hit bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hit = true
 		io.WriteString(w, successBody)
 	}))
@@ -145,7 +166,7 @@ func TestVerifyIdentity_endpointNotAllowed(t *testing.T) {
 // TestVerifyIdentity_stsRejects 는 STS 가 4xx(서명 무효)로 응답하면 검증 실패 타입
 // 에러로 구분되고 코드/메시지가 담기는지 확인한다.
 func TestVerifyIdentity_stsRejects(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/xml")
 		w.WriteHeader(http.StatusForbidden)
 		io.WriteString(w, errorBody)
@@ -173,10 +194,50 @@ func TestVerifyIdentity_stsRejects(t *testing.T) {
 	}
 }
 
+// TestVerifyIdentity_throttlingIsInfra 는 STS 스로틀링(HTTP 400 Throttling)이 영구
+// 무자격이 아니라 재시도 대상 인프라 실패로 분류되는지 확인한다.
+func TestVerifyIdentity_throttlingIsInfra(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/xml")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, throttleBody)
+	}))
+	defer srv.Close()
+
+	v := New(srv.Client(), []string{srv.URL})
+
+	_, err := v.VerifyIdentity(context.Background(), preservedFor(srv.URL))
+	if err == nil {
+		t.Fatal("스로틀링인데 에러가 나지 않음")
+	}
+	if _, ok := AsVerificationError(err); ok {
+		t.Errorf("스로틀링(400 Throttling)이 무자격으로 잘못 분류됨: %v", err)
+	}
+}
+
+// TestVerifyIdentity_tooManyRequestsIsInfra 는 HTTP 429 가 코드와 무관하게 인프라
+// 실패로 분류되는지 확인한다.
+func TestVerifyIdentity_tooManyRequestsIsInfra(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	v := New(srv.Client(), []string{srv.URL})
+
+	_, err := v.VerifyIdentity(context.Background(), preservedFor(srv.URL))
+	if err == nil {
+		t.Fatal("429 인데 에러가 나지 않음")
+	}
+	if _, ok := AsVerificationError(err); ok {
+		t.Errorf("429 가 무자격으로 잘못 분류됨: %v", err)
+	}
+}
+
 // TestVerifyIdentity_stsServerError 는 STS 5xx 는 검증 실패가 아니라 인프라 실패로
 // 전파되는지 확인한다(무자격이 아니라 재시도 대상).
 func TestVerifyIdentity_stsServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -192,10 +253,40 @@ func TestVerifyIdentity_stsServerError(t *testing.T) {
 	}
 }
 
+// TestVerifyIdentity_redirectNotFollowed 는 STS 가 3xx 를 줘도 리다이렉트를 따라가지
+// 않고(가짜 후속 호스트로 서명 요청이 새지 않고) 인프라 오류를 반환하는지 확인한다.
+func TestVerifyIdentity_redirectNotFollowed(t *testing.T) {
+	var finalHit bool
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/final":
+			// 리다이렉트를 따라갔다면 여기로 와서 200 성공이 된다.
+			finalHit = true
+			io.WriteString(w, successBody)
+		default:
+			http.Redirect(w, r, "/final", http.StatusFound)
+		}
+	}))
+	defer srv.Close()
+
+	v := New(srv.Client(), []string{srv.URL})
+
+	_, err := v.VerifyIdentity(context.Background(), preservedFor(srv.URL+"/redirect"))
+	if err == nil {
+		t.Fatal("리다이렉트 응답인데 에러가 나지 않음(따라간 것으로 보임)")
+	}
+	if _, ok := AsVerificationError(err); ok {
+		t.Errorf("리다이렉트가 무자격으로 잘못 분류됨: %v", err)
+	}
+	if finalHit {
+		t.Error("리다이렉트를 따라가 검사받지 않은 경로로 요청이 나갔음")
+	}
+}
+
 // TestVerifyIdentity_transportError 는 전송 실패(닫힌 서버)가 인프라 실패로 전파되는지
 // 확인한다.
 func TestVerifyIdentity_transportError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	target := srv.URL
 	client := srv.Client()
 	srv.Close() // 서버를 닫아 전송이 실패하게 만든다.
@@ -214,7 +305,7 @@ func TestVerifyIdentity_transportError(t *testing.T) {
 // TestVerifyIdentity_unparsableSuccess 는 200 이지만 XML 이 깨졌으면 인프라 실패로
 // 전파되는지 확인한다.
 func TestVerifyIdentity_unparsableSuccess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "not xml at all")
 	}))
 	defer srv.Close()
@@ -227,6 +318,25 @@ func TestVerifyIdentity_unparsableSuccess(t *testing.T) {
 	}
 	if _, ok := AsVerificationError(err); ok {
 		t.Errorf("파싱 실패가 검증 실패로 잘못 분류됨: %v", err)
+	}
+}
+
+// TestVerifyIdentity_oversizeBody 는 응답 본문이 상한을 넘으면 인프라 오류로 전파되는지
+// 확인한다(메모리 고갈 방지).
+func TestVerifyIdentity_oversizeBody(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, strings.Repeat("a", maxResponseBytes+1))
+	}))
+	defer srv.Close()
+
+	v := New(srv.Client(), []string{srv.URL})
+
+	_, err := v.VerifyIdentity(context.Background(), preservedFor(srv.URL))
+	if err == nil {
+		t.Fatal("상한 초과 본문인데 에러가 나지 않음")
+	}
+	if _, ok := AsVerificationError(err); ok {
+		t.Errorf("상한 초과가 무자격으로 잘못 분류됨: %v", err)
 	}
 }
 
@@ -245,17 +355,65 @@ func TestVerifyIdentity_invalidTargetURL(t *testing.T) {
 	}
 }
 
-// TestNew_endpointNormalization 은 허용 목록 항목이 scheme+host 기준으로 정규화되어,
-// 경로/대소문자/공백 차이가 있어도 같은 엔드포인트로 매칭되는지 확인한다.
+// TestVerifyIdentity_httpTargetRejected 는 http(비 https) 대상은 허용 목록 등록/매칭이
+// 안 돼 HTTP 호출 없이 거부되는지 확인한다(평문 다운그레이드 방지).
+func TestVerifyIdentity_httpTargetRejected(t *testing.T) {
+	// 허용 목록도 http 로 주지만 normalizeEndpoint 가 무효로 처리해 빈 집합이 된다.
+	v := New(http.DefaultClient, []string{"http://sts.amazonaws.com"})
+
+	_, err := v.VerifyIdentity(context.Background(), preservedFor("http://sts.amazonaws.com/"))
+	if err == nil {
+		t.Fatal("http 대상인데 에러가 나지 않음")
+	}
+	if _, ok := AsVerificationError(err); !ok {
+		t.Errorf("http 대상이 검증 실패로 거부되지 않음: %v", err)
+	}
+}
+
+// TestNormalizeEndpoint 는 정규화가 scheme(https 만)/host(소문자, 후행점 제거)/포트(기본
+// 443 보충)를 일관되게 처리해, 표기가 달라도 같은 엔드포인트가 같은 키로 매칭되는지
+// 확인한다.
+func TestNormalizeEndpoint(t *testing.T) {
+	want := "https://sts.example:443"
+	same := []string{
+		"https://sts.example",
+		"https://sts.example:443",
+		"https://sts.example.",
+		"HTTPS://STS.EXAMPLE",
+		"  https://sts.example/some/path?q=1  ",
+	}
+	for _, raw := range same {
+		if got := normalizeEndpoint(raw); got != want {
+			t.Errorf("normalizeEndpoint(%q)=%q, want %q", raw, got, want)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"http://sts.example", // https 아님
+		"://missing-scheme",  // scheme 없음
+		"sts.example:443",    // scheme 없음(host 로 해석 안 됨)
+		"https:///only-path", // host 없음
+		"ftp://sts.example",  // https 아님
+	}
+	for _, raw := range invalid {
+		if got := normalizeEndpoint(raw); got != "" {
+			t.Errorf("normalizeEndpoint(%q)=%q, want \"\"(무효)", raw, got)
+		}
+	}
+}
+
+// TestNew_endpointNormalization 은 허용 목록 항목이 정규화되어, 경로/대소문자/공백/포트
+// 표기 차이가 있어도 같은 엔드포인트로 매칭되는지 통합 수준에서 확인한다.
 func TestNew_endpointNormalization(t *testing.T) {
 	var hit bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hit = true
 		io.WriteString(w, successBody)
 	}))
 	defer srv.Close()
 
-	// 허용 목록은 뒤에 공백/경로를 붙이고, 위임 대상 URL 은 경로가 있는 형태로 준다.
+	// 허용 목록은 앞뒤 공백과 경로를 붙여 주고, 위임 대상 URL 은 경로가 있는 형태로 준다.
 	v := New(srv.Client(), []string{"  " + srv.URL + "/some/path  "})
 
 	if _, err := v.VerifyIdentity(context.Background(), preservedFor(srv.URL+"/")); err != nil {
@@ -266,8 +424,8 @@ func TestNew_endpointNormalization(t *testing.T) {
 	}
 }
 
-// 컴파일 타임 확인: AsVerificationError 가 감싼 에러도 풀어내는지(errors.As 경유)
-// 최소 sanity.
+// TestAsVerificationError_wrapped 는 AsVerificationError 가 감싼 에러도 풀어내는지
+// (errors.As 경유) 최소 sanity 를 본다.
 func TestAsVerificationError_wrapped(t *testing.T) {
 	base := &VerificationError{Reason: "테스트"}
 	wrapped := errors.Join(errors.New("바깥"), base)
