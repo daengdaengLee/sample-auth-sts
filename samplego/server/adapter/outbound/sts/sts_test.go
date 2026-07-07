@@ -365,6 +365,10 @@ func TestVerifyIdentity_oversizeRejectionKeepsStatus(t *testing.T) {
 	if ve.HTTPStatus != http.StatusForbidden {
 		t.Errorf("HTTPStatus=%d, want 403 (상태 분류가 상한 검사보다 먼저여야 함)", ve.HTTPStatus)
 	}
+	// 절단된 본문에서도 앞쪽 ErrorResponse 는 파싱되므로 Code 가 담겨야 한다.
+	if ve.STSCode != "InvalidClientTokenId" {
+		t.Errorf("STSCode=%q, want InvalidClientTokenId (절단 본문에서 Code 파싱 실패?)", ve.STSCode)
+	}
 }
 
 // TestVerifyIdentity_exactMaxBody 는 정확히 상한 크기인 본문은 거부되지 않고 정상
