@@ -340,6 +340,32 @@ func TestVerifyIdentity_oversizeBody(t *testing.T) {
 	}
 }
 
+// TestVerifyIdentity_exactMaxBody 는 정확히 상한 크기인 본문은 거부되지 않고 정상
+// 파싱되는지 확인한다(경계 off-by-one: len > max 이어야 하며 >= 이면 안 됨). 성공 XML
+// 뒤를 공백으로 채워 정확히 maxResponseBytes 로 맞춘다(뒤 공백은 파싱에 무해).
+func TestVerifyIdentity_exactMaxBody(t *testing.T) {
+	pad := maxResponseBytes - len(successBody)
+	if pad < 0 {
+		t.Fatalf("successBody 가 상한보다 큼: %d", len(successBody))
+	}
+	body := successBody + strings.Repeat(" ", pad)
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	v := New(srv.Client(), []string{srv.URL})
+
+	id, err := v.VerifyIdentity(context.Background(), preservedFor(srv.URL))
+	if err != nil {
+		t.Fatalf("정확히 상한 크기 본문인데 에러: %v", err)
+	}
+	if id.ARN != "arn:aws:iam::123456789012:role/workload" {
+		t.Errorf("ARN=%q, 정상 파싱되지 않음", id.ARN)
+	}
+}
+
 // TestVerifyIdentity_invalidTargetURL 은 위임 대상 URL 이 무효면 HTTP 호출 없이 검증
 // 실패로 거부되는지 확인한다.
 func TestVerifyIdentity_invalidTargetURL(t *testing.T) {
@@ -399,6 +425,51 @@ func TestNormalizeEndpoint(t *testing.T) {
 	for _, raw := range invalid {
 		if got := normalizeEndpoint(raw); got != "" {
 			t.Errorf("normalizeEndpoint(%q)=%q, want \"\"(무효)", raw, got)
+		}
+	}
+
+	// IPv6 host 는 대괄호를 보존한 유효한 키로 정규화되고, 포트 생략/명시가 같은 키로
+	// 매칭된다.
+	wantV6 := "https://[::1]:443"
+	for _, raw := range []string{"https://[::1]", "https://[::1]:443", "HTTPS://[::1]"} {
+		if got := normalizeEndpoint(raw); got != wantV6 {
+			t.Errorf("normalizeEndpoint(%q)=%q, want %q", raw, got, wantV6)
+		}
+	}
+}
+
+// TestIsTransientCode 는 스로틀/레이트리밋 계열 코드는 일시(재시도)로, 서명/자격 관련
+// 거절 코드는 일시가 아님으로 분류되는지 확인한다. 정확일치가 아니라 부분문자열이라
+// 목록에 없는 새 스로틀 코드도 일시로 강등되는지 함께 본다.
+func TestIsTransientCode(t *testing.T) {
+	transient := []string{
+		"Throttling",
+		"ThrottlingException",
+		"ThrottledException",
+		"RequestThrottled",
+		"RequestThrottledException",
+		"TooManyRequestsException",
+		"RequestLimitExceeded",
+		"BandwidthLimitExceeded",
+		"throttling", // 대소문자 무시
+	}
+	for _, c := range transient {
+		if !isTransientCode(c) {
+			t.Errorf("isTransientCode(%q)=false, want true(일시)", c)
+		}
+	}
+
+	permanent := []string{
+		"",
+		"InvalidClientTokenId",
+		"SignatureDoesNotMatch",
+		"ExpiredToken",
+		"AccessDenied",
+		"ValidationError",
+	}
+	for _, c := range permanent {
+		if isTransientCode(c) {
+			t.Errorf("isTransientCode(%q)=true, want false(무자격)", c)
 		}
 	}
 }

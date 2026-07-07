@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -37,14 +38,18 @@ const hostHeader = "Host"
 // 없으면 비정상/악의적 엔드포인트가 거대한 본문으로 메모리를 고갈시킬 수 있다.
 const maxResponseBytes = 1 << 20
 
-// infraErrorCodes 는 STS 가 4xx 로 돌려주더라도 영구 무자격이 아니라 일시/인프라
-// 오류(재시도 대상)로 취급할 에러 코드다. 스로틀링/레이트리밋이 여기 해당한다. 이런
-// 요청은 서명이 무효한 게 아니라 잠시 뒤 재시도하면 통과할 수 있으므로, 무자격(4xx)이
-// 아니라 인프라 실패(5xx)로 갈라야 한다. 대조는 대소문자를 무시한다.
-var infraErrorCodes = map[string]bool{
-	"throttling":           true,
-	"throttlingexception":  true,
-	"requestlimitexceeded": true,
+// isTransientCode 는 STS 에러 코드가 스로틀링/레이트리밋 같은 일시 상태인지 판단한다.
+// 이런 요청은 서명이 무효한 게 아니라 잠시 뒤 재시도하면 통과할 수 있으므로, 4xx 라도
+// 무자격이 아니라 인프라 실패(재시도 대상)로 갈라야 한다.
+//
+// AWS 는 스로틀 코드를 여러 이름으로 돌려주므로(Throttling, ThrottlingException,
+// ThrottledException, RequestThrottled(Exception), TooManyRequestsException,
+// RequestLimitExceeded 등) 정확일치 목록 대신 부분문자열로 본다. 그러면 목록에 없는
+// 새 코드도 "재시도"로 강등되어, 최악의 실패 모드(정상 호출자를 무자격으로 오거부)를
+// 피한다. 대조는 대소문자를 무시한다.
+func isTransientCode(code string) bool {
+	c := strings.ToLower(code)
+	return strings.Contains(c, "throttl") || strings.Contains(c, "exceeded") || strings.Contains(c, "toomanyrequests")
 }
 
 // VerificationError 는 STS 가 호출자 신원을 확인해 주지 못했음을(또는 위임 자체를
@@ -183,15 +188,15 @@ func (v *Verifier) VerifyIdentity(ctx context.Context, req domain.PreservedReque
 	}
 	defer resp.Body.Close()
 
-	// 본문은 상한을 두고 읽는다. 한 바이트 더 읽어 보고 상한을 넘으면 인프라 오류로
-	// 본다(비정상/악의적 엔드포인트의 메모리 고갈 방지).
+	// 본문은 상한을 두고 읽는다(비정상/악의적 엔드포인트의 메모리 고갈 방지). 한 바이트
+	// 더 읽어 초과 여부만 기록해 두고, 상태 기반 분류(3xx/4xx/5xx)를 먼저 적용한다. 큰
+	// 본문을 가진 4xx 무자격 응답이 인프라 오류로 오분류되지 않도록, 초과는 본문을 신뢰해
+	// 파싱해야 하는 성공 경로에서만 오류로 낸다.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return domain.Identity{}, fmt.Errorf("STS 응답 본문 읽기 실패: %w", err)
 	}
-	if len(body) > maxResponseBytes {
-		return domain.Identity{}, fmt.Errorf("STS 응답 본문이 상한(%d bytes)을 초과함", maxResponseBytes)
-	}
+	oversized := len(body) > maxResponseBytes
 
 	// 리다이렉트는 끄므로(New 참고) 3xx 가 여기까지 온다. STS 는 정상적으로 리다이렉트
 	// 하지 않으니, 따라가지 않은 3xx 는 무자격이 아니라 인프라 오류(예기치 않은 응답)다.
@@ -201,6 +206,11 @@ func (v *Verifier) VerifyIdentity(ctx context.Context, req domain.PreservedReque
 
 	if resp.StatusCode != http.StatusOK {
 		return domain.Identity{}, classifyErrorResponse(resp.StatusCode, body)
+	}
+
+	// 성공 응답은 본문을 XML 파싱하므로, 상한을 넘었다면(신뢰 불가) 인프라 오류로 본다.
+	if oversized {
+		return domain.Identity{}, fmt.Errorf("STS 응답 본문이 상한(%d bytes)을 초과함", maxResponseBytes)
 	}
 
 	var parsed getCallerIdentityResponse
@@ -251,7 +261,7 @@ func classifyErrorResponse(status int, body []byte) error {
 	var parsed stsErrorResponse
 	_ = xml.Unmarshal(body, &parsed) // 파싱 실패해도 상태코드로는 분류할 수 있으므로 무시한다.
 
-	transient := status == http.StatusTooManyRequests || infraErrorCodes[strings.ToLower(parsed.Error.Code)]
+	transient := status == http.StatusTooManyRequests || isTransientCode(parsed.Error.Code)
 
 	if status >= 400 && status < 500 && !transient {
 		return &VerificationError{
@@ -268,12 +278,13 @@ func classifyErrorResponse(status int, body []byte) error {
 	return fmt.Errorf("STS 위임 실패(status=%d)", status)
 }
 
-// normalizeEndpoint 는 URL 문자열에서 비교용 엔드포인트 키(scheme + "://" + host + ":" +
-// port)를 뽑는다. 경로/쿼리는 무시한다. https 가 아니거나 host 가 없으면 빈 문자열을
-// 돌려준다(무효). https 만 허용하는 것은 평문 다운그레이드를 막기 위해서다(README 의
-// STS 아웃바운드 HTTPS 요구). host 는 소문자화하고 후행 점 하나를 떼며, 포트가 비면
-// scheme 기본값(443)으로 채운다. 그래서 "sts.example:443" 과 "sts.example",
-// "sts.example." 이 같은 키로 매칭된다(포트/후행점 차이로 인한 오거부 제거).
+// normalizeEndpoint 는 URL 문자열에서 비교용 엔드포인트 키(scheme + "://" + host:port)를
+// 뽑는다. 경로/쿼리는 무시한다. https 가 아니거나 host 가 없으면 빈 문자열을 돌려준다
+// (무효). https 만 허용하는 것은 평문 다운그레이드를 막기 위해서다(README 의 STS
+// 아웃바운드 HTTPS 요구). host 는 소문자화하고 후행 점 하나를 떼며, 포트가 비면 기본값
+// (443)으로 채운다. 그래서 "sts.example:443" 과 "sts.example", "sts.example." 이 같은
+// 키로 매칭된다(포트/후행점 차이로 인한 오거부 제거). host:port 조립은 net.JoinHostPort
+// 로 해 IPv6 host 의 대괄호를 보존한다(예: "[::1]:443").
 func normalizeEndpoint(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -293,7 +304,7 @@ func normalizeEndpoint(raw string) string {
 		port = "443"
 	}
 
-	return "https://" + host + ":" + port
+	return "https://" + net.JoinHostPort(host, port)
 }
 
 // 컴파일 타임에 Verifier 가 아웃바운드 포트를 만족하는지 확인한다.
