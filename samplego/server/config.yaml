@@ -1,0 +1,22 @@
+# 서버 공유 설정 파일.
+#
+# 이 값들은 샘플 전용이며 저장소에 그대로 커밋된다(데모 편의). 특히 jwt.signing_secret 은
+# 커밋된 시크릿이므로 진짜 배포에서는 절대 이 값을 쓰지 말고, 환경변수(JWT_SIGNING_SECRET)로
+# override 하거나 별도 시크릿 관리로 주입할 것. viper 가 파일값 위에 환경변수를 덮어쓴다.
+#
+# 지금은 jwt 섹션(자격 발급 어댑터)만 쓴다. 다른 어댑터(정책/STS 등)의 이관은 이후 단계에서
+# 이 파일에 섹션을 더해 진행한다.
+
+jwt:
+  # signing_secret 은 HS256 대칭키다. 서명과 (향후) 검증에 같은 키를 쓴다. 약한 키는 서명
+  # 위조 위험이 있어 최소 32바이트(256비트)를 요구한다(issuer 어댑터가 부팅 때 강제).
+  signing_secret: "sample-only-hs256-secret-change-me-in-real-deployments"
+
+  # ttl 은 발급 토큰의 유효 기간이다. time.ParseDuration 형식("15m", "1h" 등). exp = iat + ttl.
+  ttl: "15m"
+
+  # issuer 는 발급자 식별자다(JWT iss 클레임). 향후 /verify 가 발급자 검증에 쓴다.
+  issuer: "https://server.example"
+
+  # audience 는 발급 토큰의 대상 식별자다(JWT aud 클레임). 향후 /verify 가 대상 검증에 쓴다.
+  audience: "https://server.example/clients"
