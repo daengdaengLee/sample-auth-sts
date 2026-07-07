@@ -78,6 +78,21 @@ func TestLoad_maxAgeInvalid(t *testing.T) {
 	}
 }
 
+// TestLoad_maxAgeNonPositive 는 REQUEST_MAX_AGE 가 0 이하일 때 에러를 반환하는지
+// 확인한다(0 이하면 모든 요청이 stale 로 거부되므로 부팅 시점에 막는다).
+func TestLoad_maxAgeNonPositive(t *testing.T) {
+	for _, v := range []string{"0", "0s", "-5m"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("SERVER_BINDING_VALUE", "https://server.example/audience")
+			t.Setenv("REQUEST_MAX_AGE", v)
+			t.Setenv("ALLOWED_ARNS", "")
+			if _, err := Load(); err == nil {
+				t.Fatalf("REQUEST_MAX_AGE=%q 인데 에러가 나지 않음", v)
+			}
+		})
+	}
+}
+
 // TestLoad_allowedARNsEmpty 는 ALLOWED_ARNS 가 비면 어떤 ARN 도 허용하지 않는지 확인한다.
 func TestLoad_allowedARNsEmpty(t *testing.T) {
 	t.Setenv("SERVER_BINDING_VALUE", "https://server.example/audience")

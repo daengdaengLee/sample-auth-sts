@@ -56,6 +56,9 @@ func Load() (*Config, error) {
 		}
 		maxAge = d
 	}
+	if maxAge <= 0 {
+		return nil, fmt.Errorf("환경변수 %s 는 양수여야 함(현재 %v): 0 이하면 모든 요청이 거부됨", envRequestMaxAge, maxAge)
+	}
 
 	return &Config{
 		binding:     binding,
