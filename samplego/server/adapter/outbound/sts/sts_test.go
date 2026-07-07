@@ -340,6 +340,33 @@ func TestVerifyIdentity_oversizeBody(t *testing.T) {
 	}
 }
 
+// TestVerifyIdentity_oversizeRejectionKeepsStatus 는 상한 초과 검사가 상태 분류보다
+// 뒤에 오도록 재정렬된 동작을 고정한다. 큰 본문(>상한)을 가진 4xx 무자격 응답은 상한
+// 오류(인프라)가 아니라 상태 기반 VerificationError(HTTPStatus 보존)로 분류돼야 한다.
+func TestVerifyIdentity_oversizeRejectionKeepsStatus(t *testing.T) {
+	body := errorBody + strings.Repeat("a", maxResponseBytes) // 상한 초과, 상태는 403
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/xml")
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	v := New(srv.Client(), []string{srv.URL})
+
+	_, err := v.VerifyIdentity(context.Background(), preservedFor(srv.URL))
+	if err == nil {
+		t.Fatal("초과 본문 4xx 인데 에러가 나지 않음")
+	}
+	ve, ok := AsVerificationError(err)
+	if !ok {
+		t.Fatalf("초과 본문 4xx 가 상태 기반 무자격으로 분류되지 않음(상한 오류로 새어나감?): %v", err)
+	}
+	if ve.HTTPStatus != http.StatusForbidden {
+		t.Errorf("HTTPStatus=%d, want 403 (상태 분류가 상한 검사보다 먼저여야 함)", ve.HTTPStatus)
+	}
+}
+
 // TestVerifyIdentity_exactMaxBody 는 정확히 상한 크기인 본문은 거부되지 않고 정상
 // 파싱되는지 확인한다(경계 off-by-one: len > max 이어야 하며 >= 이면 안 됨). 성공 XML
 // 뒤를 공백으로 채워 정확히 maxResponseBytes 로 맞춘다(뒤 공백은 파싱에 무해).
@@ -451,6 +478,7 @@ func TestIsTransientCode(t *testing.T) {
 		"TooManyRequestsException",
 		"RequestLimitExceeded",
 		"BandwidthLimitExceeded",
+		"LimitExceededException",
 		"throttling", // 대소문자 무시
 	}
 	for _, c := range transient {
@@ -459,6 +487,9 @@ func TestIsTransientCode(t *testing.T) {
 		}
 	}
 
+	// 영구(무자격) 코드는 false 여야 한다. 특히 매칭 토큰의 부분을 품은 비스로틀
+	// 코드(예: "...Exceeded" 지만 "limitexceeded" 아님)가 일시로 과매칭되지 않는지
+	// 확인해, 정확일치 맵과 구별되는 Contains 휴리스틱의 경계를 방어한다.
 	permanent := []string{
 		"",
 		"InvalidClientTokenId",
@@ -466,6 +497,9 @@ func TestIsTransientCode(t *testing.T) {
 		"ExpiredToken",
 		"AccessDenied",
 		"ValidationError",
+		"MalformedPolicyDocument",
+		"PackedPolicyTooLarge",
+		"WidgetCountExceeded", // "exceeded" 는 품지만 "limitexceeded" 아님 -> 무자격 유지
 	}
 	for _, c := range permanent {
 		if isTransientCode(c) {

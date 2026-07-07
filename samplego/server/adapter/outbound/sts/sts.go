@@ -44,12 +44,16 @@ const maxResponseBytes = 1 << 20
 //
 // AWS 는 스로틀 코드를 여러 이름으로 돌려주므로(Throttling, ThrottlingException,
 // ThrottledException, RequestThrottled(Exception), TooManyRequestsException,
-// RequestLimitExceeded 등) 정확일치 목록 대신 부분문자열로 본다. 그러면 목록에 없는
-// 새 코드도 "재시도"로 강등되어, 최악의 실패 모드(정상 호출자를 무자격으로 오거부)를
-// 피한다. 대조는 대소문자를 무시한다.
+// RequestLimitExceeded, BandwidthLimitExceeded, LimitExceededException 등) 정확일치
+// 목록 대신 부분문자열로 본다. 그러면 목록에 없는 새 스로틀 코드도 "재시도"로 강등되어,
+// 최악의 실패 모드(정상 호출자를 무자격으로 오거부)를 피한다.
+//
+// "exceeded" 통짜가 아니라 "limitexceeded" 로 맞춰, 레이트/대역 한도 계열만 잡고
+// 비스로틀 "...Exceeded" 코드(무자격에 가까운 것)를 일시로 오강등하지 않게 한다. 대조는
+// 대소문자를 무시한다.
 func isTransientCode(code string) bool {
 	c := strings.ToLower(code)
-	return strings.Contains(c, "throttl") || strings.Contains(c, "exceeded") || strings.Contains(c, "toomanyrequests")
+	return strings.Contains(c, "throttl") || strings.Contains(c, "limitexceeded") || strings.Contains(c, "toomanyrequests")
 }
 
 // VerificationError 는 STS 가 호출자 신원을 확인해 주지 못했음을(또는 위임 자체를
@@ -254,7 +258,7 @@ func buildRequest(ctx context.Context, req domain.PreservedRequest) (*http.Reque
 // classifyErrorResponse 는 STS 비200(3xx 제외) 응답을 검증 실패(무자격)와 인프라 실패
 // (재시도 대상)로 가른다. ErrorResponse XML 이 있으면 코드/메시지를 담는다.
 //
-// 4xx 라도 스로틀링/레이트리밋(infraErrorCodes)이나 HTTP 429 는 서명이 무효한 게 아니라
+// 4xx 라도 스로틀링/레이트리밋(isTransientCode)이나 HTTP 429 는 서명이 무효한 게 아니라
 // 잠시 뒤 재시도하면 통과할 수 있는 일시 상태이므로 인프라 실패로 돌린다. 그 외 4xx
 // (서명 무효/만료 등)만 무자격으로 본다. 5xx 는 인프라 실패다.
 func classifyErrorResponse(status int, body []byte) error {
