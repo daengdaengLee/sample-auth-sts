@@ -108,8 +108,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 // buildAuthenticator 는 헥사고날 조립 루트다. 공유 viper 를 로드해 네 개의 아웃바운드
 // 어댑터(정책/시계/STS/발급)를 만들고, 도메인 서비스에 주입해 인바운드 포트를 돌려준다.
-// 설정 로드/검증 실패(각 어댑터의 Load, 그리고 STS 허용 목록 공백)는 그대로 전파해 부팅
-// 시점에 오설정을 드러낸다.
+// 각 어댑터의 로드/검증 실패(정책/발급의 Load, STS 의 NewVerifier -- 유효한 https 엔드포인트
+// 없음)는 그대로 전파해 부팅 시점에 오설정을 드러낸다.
 func buildAuthenticator(logger *slog.Logger) (domain.Authenticator, error) {
 	v, err := sharedconfig.Load()
 	if err != nil {

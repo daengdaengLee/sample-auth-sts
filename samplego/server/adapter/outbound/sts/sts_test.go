@@ -559,19 +559,18 @@ func TestAllowedEndpointCount(t *testing.T) {
 	}
 }
 
-// TestNewVerifier 는 유효 엔드포인트가 없으면(공백/https 아님) 에러로 부팅을 막고, 있으면
-// Verifier 를 주는지 확인한다(조립 루트의 부팅 게이트를 어댑터 레벨에서 종단 검증).
+// TestNewVerifier 는 NewVerifier 고유 책임(정규화된 유효 엔드포인트 개수를 에러로 번역)만
+// 검증한다. 정규화 필터링은 TestAllowedEndpointCount, 빈 입력 파싱은 config_test 의
+// TestLoadAllowedEndpoints_empty 가 이미 커버하므로 여기서는 중복하지 않는다. 에러 케이스는
+// http 만(원시 개수는 1, 정규화 개수는 0)으로 둬, 게이트가 정규화 개수로 도는지도 함께 보증한다.
 func TestNewVerifier(t *testing.T) {
 	cases := []struct {
 		name      string
 		allowlist string
 		wantErr   bool
 	}{
-		{"미설정", "", true},
-		{"http 만", "http://sts.local", true},
-		{"공백만", "   ,  ", true},
+		{"유효 엔드포인트 없음(http 만)", "http://sts.local", true},
 		{"유효", "https://sts.amazonaws.com", false},
-		{"유효+무효 혼합", "http://x, https://sts.amazonaws.com", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
