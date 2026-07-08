@@ -3,8 +3,8 @@
 // 검증한다. 설정 소스를 한 곳(config.yaml + 환경변수 override)으로 모아, 어댑터마다 흩어진
 // 환경변수 읽기를 대신한다.
 //
-// 지금은 자격 발급 어댑터(jwt 섹션)만 이 로더를 통해 설정을 읽는다. 다른 어댑터(정책/STS)의
-// 이관은 이후 단계에서 config.yaml 에 섹션을 더해 진행한다.
+// 자격 발급(jwt), 정책(policy), STS(sts) 어댑터가 모두 이 로더를 통해 각자의 섹션을 읽는다.
+// 어댑터마다 흩어져 있던 환경변수 직접 읽기를 config.yaml 한 곳으로 모았다.
 package config
 
 import (
@@ -29,10 +29,6 @@ func Load() (*viper.Viper, error) {
 
 // load 는 주어진 디렉토리들에서 config.yaml 을 찾아 읽는다. Load 는 실행 위치(".")를,
 // 테스트는 임시 디렉토리를 넘긴다.
-//
-// 환경변수 override 를 켜 둔다: 파일값 위에 환경변수가 우선한다. 키의 점(.)을 밑줄(_)로
-// 바꿔 대조하므로, 예컨대 jwt.signing_secret 은 JWT_SIGNING_SECRET 으로 덮어쓸 수 있다.
-// 커밋된 샘플 시크릿을 실제 배포에서 안전하게 대체하기 위한 통로다.
 func load(paths ...string) (*viper.Viper, error) {
 	v := viper.New()
 	v.SetConfigName(configName)
@@ -41,11 +37,19 @@ func load(paths ...string) (*viper.Viper, error) {
 		v.AddConfigPath(p)
 	}
 
-	v.AutomaticEnv()
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	EnableEnvOverride(v)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("설정 파일(%s.%s) 로드 실패: %w", configName, configType, err)
 	}
 	return v, nil
+}
+
+// EnableEnvOverride 는 viper 에 환경변수 override 를 켠다: 파일값 위에 환경변수가 우선하며,
+// 키의 점(.)을 밑줄(_)로 바꿔 대조하므로 예컨대 jwt.signing_secret 은 JWT_SIGNING_SECRET 으로
+// 덮어쓸 수 있다(커밋된 샘플 시크릿을 실제 배포에서 안전하게 대체하기 위한 통로). 공유 로더와
+// 어댑터 테스트(internal/config/configtest)가 동일한 env 해석 구성을 쓰도록 이 한 곳에 둔다.
+func EnableEnvOverride(v *viper.Viper) {
+	v.AutomaticEnv()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 }

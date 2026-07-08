@@ -1,33 +1,37 @@
 // Package config 는 README 헥사고날 설계의 "설정 어댑터(아웃바운드 어댑터)"다.
-// 실행 환경(환경변수)에서 서버 정책 값을 읽어 도메인 코어의 Policy 아웃바운드
-// 포트를 구현한다. 코어가 실제로 판단에 쓰는 값(바인딩 기대값, 최대 age, 허용 ARN
-// 목록)만 노출한다. STS 엔드포인트 허용 목록/리전은 코어가 쓰지 않고 STS 신원 검증
-// 어댑터가 경계에서 강제하므로 여기 두지 않는다(인터페이스 분리, domain/outbound.go 참고).
+// 공유 viper(config.yaml + 환경변수 override)에서 서버 정책 값을 읽어 도메인 코어의
+// Policy 아웃바운드 포트를 구현한다. 코어가 실제로 판단에 쓰는 값(바인딩 기대값, 최대
+// age, 허용 ARN 목록)만 노출한다. STS 엔드포인트 허용 목록/리전은 코어가 쓰지 않고 STS
+// 신원 검증 어댑터가 경계에서 강제하므로 여기 두지 않는다(인터페이스 분리, domain/outbound.go
+// 참고).
 package config
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/spf13/viper"
 
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
 )
 
 const (
-	// envBindingValue 는 이 서버만 받아들이는 고유 바인딩 기대값(2단계 검증 대상)이다.
-	// 서버별 고유값이라 안전한 기본값이 없으므로 필수로 둔다.
-	envBindingValue = "SERVER_BINDING_VALUE"
+	// keyBindingValue 는 이 서버만 받아들이는 고유 바인딩 기대값(2단계 검증 대상)의 설정
+	// 키다. 서버별 고유값이라 안전한 기본값이 없으므로 필수로 둔다. 환경변수로 덮어쓸 때는
+	// POLICY_BINDING_VALUE 다(공유 로더가 점을 밑줄로 바꿔 대조).
+	keyBindingValue = "policy.binding_value"
 
-	// envRequestMaxAge 는 받아들일 서명 요청의 최대 age(4단계)다. time.ParseDuration
-	// 형식("5m", "90s" 등)으로 받으며, 미설정 시 defaultMaxAge 로 폴백한다.
-	envRequestMaxAge = "REQUEST_MAX_AGE"
+	// keyRequestMaxAge 는 받아들일 서명 요청의 최대 age(4단계)의 설정 키다.
+	// time.ParseDuration 형식("5m", "90s" 등)으로 받으며, 미설정 시 defaultMaxAge 로 폴백한다.
+	keyRequestMaxAge = "policy.request_max_age"
 
-	// envAllowedARNs 는 STS 가 돌려준 ARN 을 대조할 허용 신원 목록(7단계)이다. 쉼표로
-	// 구분한 여러 ARN 을 받으며, 미설정/빈 값이면 아무 ARN 도 허용하지 않는다.
-	envAllowedARNs = "ALLOWED_ARNS"
+	// keyAllowedARNs 는 STS 가 돌려준 ARN 을 대조할 허용 신원 목록(7단계)의 설정 키다. 쉼표로
+	// 구분한 여러 ARN 을 받으며, 미설정/빈 값이면 아무 ARN 도 허용하지 않는다. 파일값과
+	// 환경변수 override 의 파싱 의미를 일치시키려고 슬라이스가 아니라 쉼표 문자열로 받는다.
+	keyAllowedARNs = "policy.allowed_arns"
 
-	// defaultMaxAge 는 REQUEST_MAX_AGE 가 설정되지 않았을 때 쓰는 기본 최대 age 다.
+	// defaultMaxAge 는 policy.request_max_age 가 설정되지 않았을 때 쓰는 기본 최대 age 다.
 	defaultMaxAge = 5 * time.Minute
 )
 
@@ -39,31 +43,31 @@ type Config struct {
 	allowedARNs map[string]bool
 }
 
-// Load 는 환경변수에서 정책 값을 읽어 Config 를 만든다. SERVER_BINDING_VALUE 가
-// 비었거나 REQUEST_MAX_AGE 형식이 잘못되면 에러를 반환해 부팅 시점에 오설정을
-// 빨리 드러낸다.
-func Load() (*Config, error) {
-	binding := os.Getenv(envBindingValue)
+// Load 는 공유 viper 에서 정책 값을 읽어 Config 를 만든다. policy.binding_value 가
+// 비었거나 policy.request_max_age 형식이 잘못되면 에러를 반환해 부팅 시점에 오설정을
+// 빨리 드러낸다. 주입받은 v 로 테스트에서 값을 넣기 쉽다(issuer 어댑터 Load 와 동일 톤).
+func Load(v *viper.Viper) (*Config, error) {
+	binding := v.GetString(keyBindingValue)
 	if binding == "" {
-		return nil, fmt.Errorf("환경변수 %s 가 설정되지 않음(서버별 고유 바인딩 기대값 필요)", envBindingValue)
+		return nil, fmt.Errorf("설정 %s 가 비어 있음(서버별 고유 바인딩 기대값 필요)", keyBindingValue)
 	}
 
 	maxAge := defaultMaxAge
-	if v := os.Getenv(envRequestMaxAge); v != "" {
-		d, err := time.ParseDuration(v)
+	if raw := v.GetString(keyRequestMaxAge); raw != "" {
+		d, err := time.ParseDuration(raw)
 		if err != nil {
-			return nil, fmt.Errorf("환경변수 %s 파싱 실패(%q): %w", envRequestMaxAge, v, err)
+			return nil, fmt.Errorf("설정 %s 파싱 실패(%q): %w", keyRequestMaxAge, raw, err)
 		}
 		maxAge = d
 	}
 	if maxAge <= 0 {
-		return nil, fmt.Errorf("환경변수 %s 는 양수여야 함(현재 %v): 0 이하면 모든 요청이 거부됨", envRequestMaxAge, maxAge)
+		return nil, fmt.Errorf("설정 %s 는 양수여야 함(현재 %v): 0 이하면 모든 요청이 거부됨", keyRequestMaxAge, maxAge)
 	}
 
 	return &Config{
 		binding:     binding,
 		maxAge:      maxAge,
-		allowedARNs: parseARNs(os.Getenv(envAllowedARNs)),
+		allowedARNs: parseARNs(v.GetString(keyAllowedARNs)),
 	}, nil
 }
 
