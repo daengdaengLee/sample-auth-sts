@@ -78,9 +78,10 @@ func TestLoad_ttlInvalid(t *testing.T) {
 	}
 }
 
-// TestLoad_ttlNonPositive 는 jwt.ttl 이 0 이하면 에러를 반환하는지 확인한다.
-func TestLoad_ttlNonPositive(t *testing.T) {
-	for _, raw := range []string{"0", "0s", "-1m"} {
+// TestLoad_ttlBelowMinimum 는 jwt.ttl 이 최소값(1초) 미만이면 에러를 반환하는지 확인한다.
+// 0 이하뿐 아니라 1초 미만 양수(발급 시 초 단위 절삭으로 즉시 만료 토큰이 되는 값)도 막는다.
+func TestLoad_ttlBelowMinimum(t *testing.T) {
+	for _, raw := range []string{"0", "0s", "-1m", "500ms", "900ms"} {
 		t.Run(raw, func(t *testing.T) {
 			v := validViper()
 			v.Set("jwt.ttl", raw)
@@ -88,6 +89,19 @@ func TestLoad_ttlNonPositive(t *testing.T) {
 				t.Fatalf("jwt.ttl=%q 인데 에러가 나지 않음", raw)
 			}
 		})
+	}
+}
+
+// TestLoad_ttlMinimumBoundary 는 경계값(정확히 1초)이 통과하는지 확인한다.
+func TestLoad_ttlMinimumBoundary(t *testing.T) {
+	v := validViper()
+	v.Set("jwt.ttl", "1s")
+	p, err := Load(v)
+	if err != nil {
+		t.Fatalf("jwt.ttl=1s 인데 에러가 남: %v", err)
+	}
+	if got, want := p.TTL, time.Second; got != want {
+		t.Errorf("TTL=%v, want %v", got, want)
 	}
 }
 

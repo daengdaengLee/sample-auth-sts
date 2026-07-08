@@ -28,6 +28,10 @@ const (
 	// minSecretBytes 는 HS256 서명키의 최소 길이다. 256비트 미만의 약한 키는 서명 위조
 	// 위험이 있어 부팅 시점에 막는다.
 	minSecretBytes = 32
+
+	// minTTL 은 받아들일 최소 발급 TTL 이다. 발급 시 exp/iat 를 초 단위로 자르므로, 1초
+	// 미만 TTL 은 발급 즉시 만료된 토큰(exp == iat)이 되어 무의미하다. 부팅 시점에 막는다.
+	minTTL = time.Second
 )
 
 // Params 는 config.yaml 의 jwt 섹션에서 로드한 발급 설정 운반자다. New 로 넘겨 Issuer 를
@@ -59,8 +63,8 @@ func Load(v *viper.Viper) (Params, error) {
 		}
 		ttl = d
 	}
-	if ttl <= 0 {
-		return Params{}, fmt.Errorf("설정 %s 는 양수여야 함(현재 %v): 0 이하면 발급 즉시 만료된 토큰이 나옴", keyTTL, ttl)
+	if ttl < minTTL {
+		return Params{}, fmt.Errorf("설정 %s 는 최소 %v 이상이어야 함(현재 %v): 그 미만이면 초 단위 절삭으로 발급 즉시 만료된 토큰이 나옴", keyTTL, minTTL, ttl)
 	}
 
 	issuer := v.GetString(keyIssuer)
