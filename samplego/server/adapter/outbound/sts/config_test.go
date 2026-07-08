@@ -2,26 +2,12 @@ package sts
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
-)
 
-// loaderViper 는 공유 설정 로더(internal/config)와 동일하게 구성한 viper 를 만든다:
-// yaml 파일값을 읽고 AutomaticEnv + 점->밑줄 replacer 를 켠다. viper.Set 은 env 해석 경로를
-// 우회하므로, env override 회귀 테스트에는 실제 로더 구성을 재현한 이 헬퍼를 쓴다.
-func loaderViper(t *testing.T, yamlBody string) *viper.Viper {
-	t.Helper()
-	v := viper.New()
-	v.SetConfigType("yaml")
-	if err := v.ReadConfig(strings.NewReader(yamlBody)); err != nil {
-		t.Fatalf("설정 파싱 실패: %v", err)
-	}
-	v.AutomaticEnv()
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	return v
-}
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/internal/config/configtest"
+)
 
 // TestLoadAllowedEndpoints_success 는 sts.endpoint_allowlist 를 쉼표로 갈라 앞뒤 공백과
 // 빈 항목을 정리한 목록으로 돌려주는지 확인한다.
@@ -60,7 +46,7 @@ func TestLoadAllowedEndpoints_empty(t *testing.T) {
 // STS_ENDPOINT_ALLOWLIST 환경변수가 config.yaml 파일값을 덮어쓰고, 콤마 목록을 트리밍해
 // 반환하는지 확인한다. override 이름이 sts.endpoint_allowlist 키에 실제로 연결되는지 잠근다.
 func TestLoadAllowedEndpoints_envOverride(t *testing.T) {
-	v := loaderViper(t, "sts:\n  endpoint_allowlist: https://from-file.example\n")
+	v := configtest.Loader(t, "sts:\n  endpoint_allowlist: https://from-file.example\n")
 
 	t.Setenv("STS_ENDPOINT_ALLOWLIST", " https://a.example, ,https://b.example ")
 

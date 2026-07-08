@@ -1,11 +1,12 @@
 package config
 
 import (
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/viper"
+
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/internal/config/configtest"
 )
 
 // validViper 는 세 정책 값을 모두 채운 viper 를 만든다. 각 테스트는 필요한 키만 바꿔 특정
@@ -15,22 +16,6 @@ func validViper() *viper.Viper {
 	v.Set("policy.binding_value", "https://server.example/audience")
 	v.Set("policy.request_max_age", "3m")
 	v.Set("policy.allowed_arns", " arn:aws:iam::123456789012:role/workload , ,arn:aws:iam::123456789012:role/other ")
-	return v
-}
-
-// loaderViper 는 공유 설정 로더(internal/config)와 동일하게 구성한 viper 를 만든다:
-// yaml 파일값을 읽고 AutomaticEnv + 점->밑줄 replacer 를 켠다. validViper 의 viper.Set 은
-// 최우선 override 를 직접 주입해 env 해석 경로를 우회하므로, env override 회귀 테스트에는
-// 실제 로더 구성을 재현한 이 헬퍼를 쓴다.
-func loaderViper(t *testing.T, yamlBody string) *viper.Viper {
-	t.Helper()
-	v := viper.New()
-	v.SetConfigType("yaml")
-	if err := v.ReadConfig(strings.NewReader(yamlBody)); err != nil {
-		t.Fatalf("설정 파싱 실패: %v", err)
-	}
-	v.AutomaticEnv()
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	return v
 }
 
@@ -133,7 +118,7 @@ func TestLoad_allowedARNsEmpty(t *testing.T) {
 // 키에 연결되는지 잠근다. 키 상수 오타나 replacer 를 통과하지 못하는 키가 생기면 조립 경로에서
 // 조용히 깨지는 것을 이 테스트가 잡는다.
 func TestLoad_envOverride(t *testing.T) {
-	v := loaderViper(t, "policy:\n"+
+	v := configtest.Loader(t, "policy:\n"+
 		"  binding_value: from-file\n"+
 		"  request_max_age: 1m\n"+
 		"  allowed_arns: arn:aws:iam::123456789012:role/from-file\n")
