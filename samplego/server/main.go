@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -126,21 +127,22 @@ func buildAuthenticator(logger *slog.Logger) (domain.Authenticator, error) {
 		return nil, err
 	}
 
-	// STS 허용 목록이 비면 sts.New 는 모든 위임을 거부하므로, 서버가 떠도 모든 /auth 가 런타임에
-	// 실패한다. LoadAllowedEndpoints 는 에러를 내지 않으므로(순수 파싱), 조립 루트에서 공백을
-	// 부팅 실패로 승격해 "떠 있지만 아무도 인증 못 하는" 상태를 막는다.
-	allowedEndpoints := sts.LoadAllowedEndpoints(v)
-	if len(allowedEndpoints) == 0 {
-		return nil, errors.New("설정 sts.endpoint_allowlist 가 비어 있음(위임할 STS 엔드포인트가 하나도 없음)")
-	}
-
 	clk := clock.New()
 	httpClient := &http.Client{Timeout: stsRequestTimeout}
-	verifier := sts.New(httpClient, allowedEndpoints)
+	verifier := sts.New(httpClient, sts.LoadAllowedEndpoints(v))
+
+	// 유효한 STS 엔드포인트가 하나도 없으면 sts.New 는 모든 위임을 거부하므로, 서버가 떠도
+	// 모든 /auth 가 런타임에 401 로 실패한다. 정규화를 통과한 개수(AllowedEndpointCount)로
+	// 게이트해 공백뿐 아니라 https 아님 같은 오설정도 부팅 실패로 승격한다("떠 있지만 아무도
+	// 인증 못 하는" 상태 방지). 원시 항목 수로 세면 http:// 같은 무효 항목을 못 걸러낸다.
+	if verifier.AllowedEndpointCount() == 0 {
+		return nil, fmt.Errorf("설정 %s 에 유효한 https STS 엔드포인트가 하나도 없음", sts.KeyAllowedEndpoints)
+	}
+
 	iss := issuer.New(issuerParams)
 
 	logger.Info("composition root assembled",
-		slog.Int("sts_endpoint_count", len(allowedEndpoints)),
+		slog.Int("sts_endpoint_count", verifier.AllowedEndpointCount()),
 		slog.Duration("sts_timeout", stsRequestTimeout),
 	)
 

@@ -113,13 +113,13 @@ func (h *Handler) Authenticate(c *gin.Context) {
 
 	// 신선도 근거(SignedAt)는 서명된 X-Amz-Date 에서만 얻는다. 서명 범위 밖 날짜는 위조로
 	// 신선도를 되살릴 수 있으므로 거부한다.
-	dateVals := headerValues(req.Headers, amzDateHeader)
-	if len(dateVals) != 1 || !signed[strings.ToLower(amzDateHeader)] {
-		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 부재/다중/미서명", slog.Int("count", len(dateVals)))
+	rawDate, count, ok := singleSignedValue(req.Headers, signed, amzDateHeader)
+	if !ok {
+		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 부재/다중/미서명", slog.Int("count", count))
 		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
 		return
 	}
-	signedAt, err := time.Parse(amzDateFormat, dateVals[0])
+	signedAt, err := time.Parse(amzDateFormat, rawDate)
 	if err != nil {
 		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 파싱 실패", slog.Any("error", err))
 		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 형식이 올바르지 않음")
@@ -128,13 +128,12 @@ func (h *Handler) Authenticate(c *gin.Context) {
 
 	// 바인딩 헤더가 없거나(또는 다중이거나) 서명 범위 밖이면, 이 증명이 이 서버로 바인딩됐다고
 	// 볼 수 없다(혼동된 대리자). 값 대조(코어) 이전에 여기서 거부한다.
-	bindingVals := headerValues(req.Headers, bindingHeader)
-	if len(bindingVals) != 1 || !signed[strings.ToLower(bindingHeader)] {
-		h.logger.WarnContext(ctx, "바인딩 헤더가 없거나 다중이거나 서명 범위 밖", slog.Int("count", len(bindingVals)))
+	binding, count, ok := singleSignedValue(req.Headers, signed, bindingHeader)
+	if !ok {
+		h.logger.WarnContext(ctx, "바인딩 헤더가 없거나 다중이거나 서명 범위 밖", slog.Int("count", count))
 		writeError(c, http.StatusForbidden, "binding_not_signed", "서버 바인딩 헤더가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
 		return
 	}
-	binding := bindingVals[0]
 
 	// Action 은 위임 형태 검증(코어 3단계)용 추출값이다. 정확히 1개일 때만 채우고, 부재/중복
 	// (파라미터 오염)이면 빈 값으로 두어 코어가 invalid_shape 로 거르게 한다. 첫 값 묵시 채택을
@@ -172,8 +171,8 @@ func (h *Handler) Authenticate(c *gin.Context) {
 }
 
 // writeAuthError 는 도메인/어댑터가 돌려준 에러를 HTTP 상태로 매핑해 응답한다. 로컬 거부
-// (RejectionError)는 사유별 4xx 로, STS 검증 실패(VerificationError)는 401 무자격으로, 그 외
-// 인프라 오류는 502 로 매핑한다.
+// (domain.RejectionError)는 사유별 4xx 로, 위임 검증 무자격(domain.VerificationRejected)은
+// 401 로, 그 외 인프라 오류는 502 로 매핑한다.
 func (h *Handler) writeAuthError(c *gin.Context, err error) {
 	ctx := c.Request.Context()
 
@@ -227,6 +226,18 @@ func headerValues(h map[string][]string, name string) []string {
 		}
 	}
 	return vals
+}
+
+// singleSignedValue 는 name 헤더가 정확히 1개 값이고 그 헤더가 SigV4 SignedHeaders 목록에
+// 포함됐는지 확인해 그 값을 돌려준다. 조건을 못 맞추면 ok=false 와 값 개수를 준다(호출부가
+// 상태코드/식별자/메시지를 정함). 서명 밖 다중값/주입 헤더를 신선도/바인딩 근거로 쓰지 않도록
+// 막는 date/binding 공통 검사다. Authorization 은 signed 를 만들어내는 단계라 여기 쓰지 않는다.
+func singleSignedValue(h map[string][]string, signed map[string]bool, name string) (string, int, bool) {
+	vals := headerValues(h, name)
+	if len(vals) != 1 || !signed[strings.ToLower(name)] {
+		return "", len(vals), false
+	}
+	return vals[0], len(vals), true
 }
 
 // signedHeaderSet 은 SigV4 Authorization 헤더 값에서 SignedHeaders 구간을 찾아, 세미콜론으로

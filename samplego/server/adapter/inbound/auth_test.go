@@ -179,6 +179,23 @@ func TestAuthenticate_invalidJSON(t *testing.T) {
 	}
 }
 
+// TestAuthenticate_bodyTooLarge 는 본문이 상한(maxAuthBodyBytes)을 넘으면 413 이고 코어를
+// 호출하지 않는지 확인한다(DoS 가드). MaxBytesReader 초과 -> *http.MaxBytesError -> 413.
+func TestAuthenticate_bodyTooLarge(t *testing.T) {
+	fake := &fakeAuthenticator{}
+	// maxAuthBodyBytes 를 확실히 넘기도록 body 필드에 큰 문자열을 채운 유효 JSON 을 만든다.
+	huge := `{"method":"POST","body":"` + strings.Repeat("A", maxAuthBodyBytes) + `"}`
+
+	rec := doAuth(newAuthEngine(fake), []byte(huge))
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if fake.called {
+		t.Error("상한 초과인데 코어가 호출됨")
+	}
+}
+
 // TestAuthenticate_preValidation 은 도메인 호출 전 사전검증 실패가 올바른 상태로 매핑되고,
 // 코어를 호출하지 않는지 표로 확인한다.
 func TestAuthenticate_preValidation(t *testing.T) {
@@ -381,8 +398,36 @@ sts:
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("응답 파싱 실패: %v", err)
 	}
-	if parts := strings.Split(resp.Token, "."); len(parts) != 3 {
-		t.Errorf("발급 토큰이 JWT(3 세그먼트) 형태가 아님: %q", resp.Token)
+	// 발급 토큰의 payload 클레임이 issuer 설정에서 온 값인지 확인한다(설정 배선이 실제로
+	// 반영되는지 검증. 3-세그먼트 형태 검사만으로는 iss/aud/ttl 오배선을 놓친다).
+	parts := strings.Split(resp.Token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("발급 토큰이 JWT(3 세그먼트) 형태가 아님: %q", resp.Token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("JWT payload base64url 디코드 실패: %v", err)
+	}
+	var claims struct {
+		Iss string `json:"iss"`
+		Sub string `json:"sub"`
+		Aud string `json:"aud"`
+		Exp int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("JWT 클레임 파싱 실패: %v", err)
+	}
+	if claims.Iss != "https://server.example" {
+		t.Errorf("iss = %q, want https://server.example", claims.Iss)
+	}
+	if claims.Aud != "https://server.example/clients" {
+		t.Errorf("aud = %q, want https://server.example/clients", claims.Aud)
+	}
+	if claims.Sub != "arn:aws:iam::123456789012:role/workload" {
+		t.Errorf("sub = %q, want 검증된 ARN", claims.Sub)
+	}
+	if claims.Exp <= 0 {
+		t.Errorf("exp = %d, want > 0", claims.Exp)
 	}
 	if resp.ExpiresAt == "" {
 		t.Error("expires_at 이 비어 있음")

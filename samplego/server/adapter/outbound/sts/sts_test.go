@@ -155,7 +155,7 @@ func TestVerifyIdentity_endpointNotAllowed(t *testing.T) {
 	if err == nil {
 		t.Fatal("허용 목록 밖 엔드포인트인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); !ok {
+	if _, ok := asVerificationError(err); !ok {
 		t.Errorf("검증 실패 타입이 아님: %v", err)
 	}
 	if hit {
@@ -179,7 +179,7 @@ func TestVerifyIdentity_stsRejects(t *testing.T) {
 	if err == nil {
 		t.Fatal("STS 가 거절했는데 에러가 나지 않음")
 	}
-	ve, ok := AsVerificationError(err)
+	ve, ok := asVerificationError(err)
 	if !ok {
 		t.Fatalf("검증 실패 타입이 아님: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestVerifyIdentity_throttlingIsInfra(t *testing.T) {
 	if err == nil {
 		t.Fatal("스로틀링인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("스로틀링(400 Throttling)이 무자격으로 잘못 분류됨: %v", err)
 	}
 }
@@ -229,7 +229,7 @@ func TestVerifyIdentity_tooManyRequestsIsInfra(t *testing.T) {
 	if err == nil {
 		t.Fatal("429 인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("429 가 무자격으로 잘못 분류됨: %v", err)
 	}
 }
@@ -248,7 +248,7 @@ func TestVerifyIdentity_stsServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("STS 5xx 인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("STS 5xx 가 검증 실패로 잘못 분류됨: %v", err)
 	}
 }
@@ -275,7 +275,7 @@ func TestVerifyIdentity_redirectNotFollowed(t *testing.T) {
 	if err == nil {
 		t.Fatal("리다이렉트 응답인데 에러가 나지 않음(따라간 것으로 보임)")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("리다이렉트가 무자격으로 잘못 분류됨: %v", err)
 	}
 	if finalHit {
@@ -297,7 +297,7 @@ func TestVerifyIdentity_transportError(t *testing.T) {
 	if err == nil {
 		t.Fatal("전송이 실패해야 하는데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("전송 실패가 검증 실패로 잘못 분류됨: %v", err)
 	}
 }
@@ -316,7 +316,7 @@ func TestVerifyIdentity_unparsableSuccess(t *testing.T) {
 	if err == nil {
 		t.Fatal("파싱 불가 응답인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("파싱 실패가 검증 실패로 잘못 분류됨: %v", err)
 	}
 }
@@ -335,7 +335,7 @@ func TestVerifyIdentity_oversizeBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("상한 초과 본문인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("상한 초과가 무자격으로 잘못 분류됨: %v", err)
 	}
 }
@@ -358,7 +358,7 @@ func TestVerifyIdentity_oversizeRejectionKeepsStatus(t *testing.T) {
 	if err == nil {
 		t.Fatal("초과 본문 4xx 인데 에러가 나지 않음")
 	}
-	ve, ok := AsVerificationError(err)
+	ve, ok := asVerificationError(err)
 	if !ok {
 		t.Fatalf("초과 본문 4xx 가 상태 기반 무자격으로 분류되지 않음(상한 오류로 새어나감?): %v", err)
 	}
@@ -407,7 +407,7 @@ func TestVerifyIdentity_invalidTargetURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("무효 URL 인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); !ok {
+	if _, ok := asVerificationError(err); !ok {
 		t.Errorf("무효 URL 이 검증 실패로 분류되지 않음: %v", err)
 	}
 }
@@ -422,7 +422,7 @@ func TestVerifyIdentity_httpTargetRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("http 대상인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); !ok {
+	if _, ok := asVerificationError(err); !ok {
 		t.Errorf("http 대상이 검증 실패로 거부되지 않음: %v", err)
 	}
 }
@@ -533,12 +533,12 @@ func TestNew_endpointNormalization(t *testing.T) {
 	}
 }
 
-// TestAsVerificationError_wrapped 는 AsVerificationError 가 감싼 에러도 풀어내는지
+// TestAsVerificationError_wrapped 는 asVerificationError 가 감싼 에러도 풀어내는지
 // (errors.As 경유) 최소 sanity 를 본다.
 func TestAsVerificationError_wrapped(t *testing.T) {
 	base := &VerificationError{Reason: "테스트"}
 	wrapped := errors.Join(errors.New("바깥"), base)
-	if _, ok := AsVerificationError(wrapped); !ok {
+	if _, ok := asVerificationError(wrapped); !ok {
 		t.Error("감싼 VerificationError 를 풀어내지 못함")
 	}
 }
