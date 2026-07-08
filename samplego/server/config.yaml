@@ -4,8 +4,8 @@
 # 커밋된 시크릿이므로 진짜 배포에서는 절대 이 값을 쓰지 말고, 환경변수(JWT_SIGNING_SECRET)로
 # override 하거나 별도 시크릿 관리로 주입할 것. viper 가 파일값 위에 환경변수를 덮어쓴다.
 #
-# 지금은 jwt 섹션(자격 발급 어댑터)만 쓴다. 다른 어댑터(정책/STS 등)의 이관은 이후 단계에서
-# 이 파일에 섹션을 더해 진행한다.
+# 어댑터별로 자기 섹션(jwt/policy/sts)을 이 파일에서 읽는다. 값 위에 환경변수를 덮어쓸 때는
+# 키의 점을 밑줄로 바꾼 이름을 쓴다(예: jwt.signing_secret -> JWT_SIGNING_SECRET).
 
 jwt:
   # signing_secret 은 HS256 대칭키다. 서명과 (향후) 검증에 같은 키를 쓴다. 약한 키는 서명
@@ -20,3 +20,23 @@ jwt:
 
   # audience 는 발급 토큰의 대상 식별자다(JWT aud 클레임). 향후 /verify 가 대상 검증에 쓴다.
   audience: "https://server.example/clients"
+
+# policy 섹션은 정책 어댑터(도메인 Policy 포트)가 읽는다. 코어가 신뢰 판단에 쓰는 값이다.
+policy:
+  # binding_value 는 이 서버만 받아들이는 고유 바인딩 기대값이다(2단계, 혼동된 대리자 방지).
+  # 서버별 고유값이라 안전한 기본값이 없어 필수다. env override: POLICY_BINDING_VALUE.
+  binding_value: "https://server.example/audience"
+
+  # request_max_age 는 받아들일 서명 요청의 최대 age 다(4단계, 재전송 방지). time.ParseDuration
+  # 형식("5m", "90s" 등). 미설정 시 기본 5m. env override: POLICY_REQUEST_MAX_AGE.
+  request_max_age: "5m"
+
+  # allowed_arns 는 STS 가 돌려준 ARN 을 대조할 허용 신원 목록이다(7단계). 쉼표로 구분하며,
+  # 미설정/빈 값이면 아무 ARN 도 허용하지 않는다(전부 거부). env override: POLICY_ALLOWED_ARNS.
+  allowed_arns: "arn:aws:iam::123456789012:role/workload"
+
+# sts 섹션은 STS 신원 검증 어댑터가 읽는다. 위임 대상 엔드포인트를 경계에서 강제한다.
+sts:
+  # endpoint_allowlist 는 위임을 허용할 진짜 STS 엔드포인트 목록이다(5단계). 쉼표로 구분하며,
+  # 미설정/빈 값이면 아무 엔드포인트도 허용하지 않는다(전부 거부). env override: STS_ENDPOINT_ALLOWLIST.
+  endpoint_allowlist: "https://sts.amazonaws.com"
