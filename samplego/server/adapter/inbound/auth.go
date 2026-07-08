@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/sts"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
 )
 
@@ -30,6 +30,11 @@ const (
 
 	// amzDateFormat 은 X-Amz-Date 의 ISO8601 basic 형식이다(예: 20260708T120000Z).
 	amzDateFormat = "20060102T150405Z"
+
+	// maxAuthBodyBytes 는 /auth 요청 본문의 최대 바이트다. 서명된 GetCallerIdentity 엔벨로프는
+	// 작으므로(수 KB) 넉넉히 1 MiB 로 두고, 이를 넘으면 413 으로 거부한다. 상한이 없으면 거대한
+	// 본문으로 메모리를 고갈시키는 값싼 DoS 가 가능하다(STS 응답 상한 maxResponseBytes 와 같은 톤).
+	maxAuthBodyBytes = 1 << 20
 )
 
 // authRequest 는 /auth 요청 본문(JSON 엔벨로프)이다. 클라이언트가 SigV4 로 서명한 원본
@@ -60,8 +65,18 @@ type errorResponse struct {
 func (h *Handler) Authenticate(c *gin.Context) {
 	ctx := c.Request.Context()
 
+	// 본문 크기를 제한해 거대한 엔벨로프로 인한 메모리 고갈(DoS)을 막는다. 상한 초과는
+	// ShouldBindJSON 이 *http.MaxBytesError 로 돌려주므로 413 으로, 그 외 파싱 실패는 400 으로 가른다.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAuthBodyBytes)
+
 	var req authRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			h.logger.InfoContext(ctx, "auth 요청 본문이 상한 초과", slog.Int64("limit", tooLarge.Limit))
+			writeError(c, http.StatusRequestEntityTooLarge, "body_too_large", "요청 본문이 허용 크기를 초과함")
+			return
+		}
 		h.logger.InfoContext(ctx, "auth 요청 본문 파싱 실패", slog.Any("error", err))
 		writeError(c, http.StatusBadRequest, "invalid_body", "요청 본문 JSON 파싱 실패")
 		return
@@ -76,10 +91,20 @@ func (h *Handler) Authenticate(c *gin.Context) {
 		return
 	}
 
+	// 보안 관련 헤더는 정확히 1개 값만 허용한다. 대소문자만 다른 중복 키(예: X-Amz-Date 와
+	// x-amz-date)는 서로 다른 JSON 키로 언마샬되어, 첫 값을 취하면 어느 값이 뽑힐지 맵 순회
+	// 순서에 따라 비결정적이 된다. STS 는 canonical 화 시 모든 값을 합치므로, 로컬 판단과
+	// 어긋나지 않도록 다중 값을 아예 거부한다.
+	authzVals := headerValues(req.Headers, authorizationHeader)
+	if len(authzVals) != 1 {
+		h.logger.InfoContext(ctx, "auth 요청 Authorization 헤더 값 개수 비정상", slog.Int("count", len(authzVals)))
+		writeError(c, http.StatusBadRequest, "invalid_signature", "Authorization 헤더가 없거나 값이 2개 이상임")
+		return
+	}
+
 	// SigV4 SignedHeaders 목록을 뽑는다. 서명 밖에서 주입된 헤더는 STS 가 서명 검증에서
 	// 무시하므로, 신선도/바인딩 근거 헤더가 이 목록 안에 있는지 확인해 위변조 우회를 막는다.
-	authz, _ := headerLookup(req.Headers, authorizationHeader)
-	signed := signedHeaderSet(authz)
+	signed := signedHeaderSet(authzVals[0])
 	if len(signed) == 0 {
 		h.logger.InfoContext(ctx, "auth 요청 SignedHeaders 해석 불가")
 		writeError(c, http.StatusBadRequest, "invalid_signature", "Authorization 헤더의 SignedHeaders 를 해석할 수 없음")
@@ -88,33 +113,37 @@ func (h *Handler) Authenticate(c *gin.Context) {
 
 	// 신선도 근거(SignedAt)는 서명된 X-Amz-Date 에서만 얻는다. 서명 범위 밖 날짜는 위조로
 	// 신선도를 되살릴 수 있으므로 거부한다.
-	rawDate, ok := headerLookup(req.Headers, amzDateHeader)
-	if !ok || !signed[strings.ToLower(amzDateHeader)] {
-		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 부재/미서명", slog.Bool("present", ok))
-		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 가 없거나 서명 범위에 포함되지 않음")
+	dateVals := headerValues(req.Headers, amzDateHeader)
+	if len(dateVals) != 1 || !signed[strings.ToLower(amzDateHeader)] {
+		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 부재/다중/미서명", slog.Int("count", len(dateVals)))
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
 		return
 	}
-	signedAt, err := time.Parse(amzDateFormat, rawDate)
+	signedAt, err := time.Parse(amzDateFormat, dateVals[0])
 	if err != nil {
 		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 파싱 실패", slog.Any("error", err))
 		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 형식이 올바르지 않음")
 		return
 	}
 
-	// 바인딩 헤더가 없거나 서명 범위 밖이면, 이 증명이 이 서버로 바인딩됐다고 볼 수 없다
-	// (혼동된 대리자). 값 대조(코어) 이전에 서명 범위 밖 주입을 여기서 거부한다.
-	binding, ok := headerLookup(req.Headers, bindingHeader)
-	if !ok || !signed[strings.ToLower(bindingHeader)] {
-		h.logger.WarnContext(ctx, "바인딩 헤더가 서명 범위에 없음", slog.Bool("present", ok))
-		writeError(c, http.StatusForbidden, "binding_not_signed", "서버 바인딩 헤더가 없거나 서명 범위에 포함되지 않음")
+	// 바인딩 헤더가 없거나(또는 다중이거나) 서명 범위 밖이면, 이 증명이 이 서버로 바인딩됐다고
+	// 볼 수 없다(혼동된 대리자). 값 대조(코어) 이전에 여기서 거부한다.
+	bindingVals := headerValues(req.Headers, bindingHeader)
+	if len(bindingVals) != 1 || !signed[strings.ToLower(bindingHeader)] {
+		h.logger.WarnContext(ctx, "바인딩 헤더가 없거나 다중이거나 서명 범위 밖", slog.Int("count", len(bindingVals)))
+		writeError(c, http.StatusForbidden, "binding_not_signed", "서버 바인딩 헤더가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
 		return
 	}
+	binding := bindingVals[0]
 
-	// Action 은 위임 형태 검증(코어 3단계)용 추출값이다. 파싱 실패/부재면 빈 값으로 두어,
-	// 코어가 invalid_shape 로 거르게 한다.
+	// Action 은 위임 형태 검증(코어 3단계)용 추출값이다. 정확히 1개일 때만 채우고, 부재/중복
+	// (파라미터 오염)이면 빈 값으로 두어 코어가 invalid_shape 로 거르게 한다. 첫 값 묵시 채택을
+	// 없애, STS 가 실제로 해석하는 값과 로컬 판단이 어긋나지 않게 한다.
 	action := ""
 	if form, err := url.ParseQuery(string(body)); err == nil {
-		action = form.Get("Action")
+		if vals := form["Action"]; len(vals) == 1 {
+			action = vals[0]
+		}
 	}
 
 	out, err := h.auth.Authenticate(ctx, domain.AuthenticateInput{
@@ -155,9 +184,9 @@ func (h *Handler) writeAuthError(c *gin.Context, err error) {
 		return
 	}
 
-	if ve, ok := sts.AsVerificationError(err); ok {
-		h.logger.InfoContext(ctx, "STS 신원 검증 실패", slog.String("reason", ve.Reason), slog.Int("sts_status", ve.HTTPStatus))
-		writeError(c, http.StatusUnauthorized, "verification_failed", "STS 가 서명된 요청을 검증하지 못함")
+	if ve, ok := domain.AsVerificationRejected(err); ok {
+		h.logger.InfoContext(ctx, "신원 검증 무자격", slog.String("reason", ve.Reason))
+		writeError(c, http.StatusUnauthorized, "verification_failed", "신원 검증에 실패함(서명 무효/만료 등)")
 		return
 	}
 
@@ -169,15 +198,14 @@ func (h *Handler) writeAuthError(c *gin.Context, err error) {
 }
 
 // rejectionStatus 는 로컬 거부 사유를 HTTP 상태로 매핑한다. 형태 불량은 400, 신선도 초과는
-// 401, 바인딩 불일치/허용되지 않은 ARN 은 403 이다.
+// 401 이다. 그 외(바인딩 불일치/허용되지 않은 ARN, 그리고 향후 추가될 미분류 사유)는 안전하게
+// 거부(403)로 매핑한다.
 func rejectionStatus(reason domain.RejectionReason) int {
 	switch reason {
 	case domain.ReasonInvalidShape:
 		return http.StatusBadRequest
 	case domain.ReasonStale:
 		return http.StatusUnauthorized
-	case domain.ReasonBindingMismatch, domain.ReasonARNNotAllowed:
-		return http.StatusForbidden
 	default:
 		return http.StatusForbidden
 	}
@@ -188,15 +216,17 @@ func writeError(c *gin.Context, status int, reason, message string) {
 	c.JSON(status, errorResponse{Error: reason, Message: message})
 }
 
-// headerLookup 은 헤더 맵에서 name 을 대소문자 무시로 찾아 첫 값을 돌려준다. 값이 없으면
-// (키 부재 또는 빈 슬라이스) false 를 돌려준다.
-func headerLookup(h map[string][]string, name string) (string, bool) {
+// headerValues 는 헤더 맵에서 name 과 대소문자 무시로 일치하는 모든 키의 값을 하나로 모아
+// 돌려준다. 대소문자만 다른 중복 키(JSON 이 서로 다른 키로 언마샬)까지 합쳐, 보안 관련 헤더의
+// "정확히 1개" 검사가 중복 주입을 놓치지 않게 한다.
+func headerValues(h map[string][]string, name string) []string {
+	var vals []string
 	for k, v := range h {
-		if strings.EqualFold(k, name) && len(v) > 0 {
-			return v[0], true
+		if strings.EqualFold(k, name) {
+			vals = append(vals, v...)
 		}
 	}
-	return "", false
+	return vals
 }
 
 // signedHeaderSet 은 SigV4 Authorization 헤더 값에서 SignedHeaders 구간을 찾아, 세미콜론으로

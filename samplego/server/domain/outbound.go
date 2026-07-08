@@ -9,6 +9,10 @@ import (
 // 요청을 그대로 넘기면 호출자 신원(ARN 등)을 돌려받는다(5~6단계). 위임 대상 엔드포인트가
 // 허용 목록의 진짜 STS 인지(5단계 STS 엔드포인트 신뢰)는 이 포트를 구현하는 어댑터가
 // 경계에서 강제하며, 코어는 관여하지 않는다.
+//
+// 에러 계약: 무자격(클라이언트측 거절, 예: 서명 무효/만료)은 *VerificationRejected 로(감싸서라도)
+// 반환하고, 전송 실패/5xx/파싱 불가 같은 인프라 실패는 일반 에러로 반환한다. 코어는 이 에러를
+// 그대로 전파하므로, 수신 어댑터가 이 도메인 타입만으로 무자격(4xx) 대 인프라(5xx)를 가른다.
 type IdentityVerifier interface {
 	VerifyIdentity(ctx context.Context, req PreservedRequest) (Identity, error)
 }

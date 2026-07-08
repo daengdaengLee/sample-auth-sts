@@ -6,24 +6,31 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/spf13/viper"
 
-	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/clock"
 	policyconfig "github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/config"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/issuer"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/sts"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/internal/config/configtest"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/internal/logging"
 )
+
+// fixedClock 는 신선도 검증을 결정적으로 만들기 위한 domain.Clock 구현이다. e2e 테스트가 실제
+// 벽시계 대신 고정 시각을 쓰도록 한다.
+type fixedClock struct{ t time.Time }
+
+func (c fixedClock) Now() time.Time { return c.t }
 
 // fakeAuthenticator 는 인바운드 포트 대역이다. 주입한 결과/에러를 돌려주고, 호출 여부와
 // 넘어온 입력을 기록해 HTTP 매핑과 파싱 결과를 격리 검증한다.
@@ -91,7 +98,8 @@ func TestAuthenticate_success(t *testing.T) {
 		Identity:   domain.Identity{ARN: "arn:aws:iam::123456789012:role/workload"},
 	}}
 
-	rec := doAuth(newAuthEngine(fake), mustJSON(t, validEnvelope()))
+	env := validEnvelope()
+	rec := doAuth(newAuthEngine(fake), mustJSON(t, env))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
@@ -125,11 +133,37 @@ func TestAuthenticate_success(t *testing.T) {
 	if !sr.SignedAt.Equal(wantAt) {
 		t.Errorf("SignedAt = %v, want %v", sr.SignedAt, wantAt)
 	}
+	// STS 로 위임할 원본이 재구성 없이 그대로 넘어가는지 확인한다(이 핸들러의 보안 핵심).
+	if sr.Original.Method != "POST" {
+		t.Errorf("Original.Method = %q", sr.Original.Method)
+	}
 	if sr.Original.URL != "https://sts.amazonaws.com/" {
 		t.Errorf("Original.URL = %q", sr.Original.URL)
 	}
+	if !reflect.DeepEqual(sr.Original.Header, env.Headers) {
+		t.Errorf("Original.Header 가 엔벨로프 헤더와 다름:\n got=%v\nwant=%v", sr.Original.Header, env.Headers)
+	}
 	if got := string(sr.Original.Body); got != "Action=GetCallerIdentity&Version=2011-06-15" {
 		t.Errorf("Original.Body = %q", got)
+	}
+}
+
+// TestAuthenticate_duplicateActionIgnored 는 바디에 Action 이 중복되면(파라미터 오염) 핸들러가
+// 첫 값을 묵시 채택하지 않고 빈 Action 을 코어로 넘겨, 코어가 형태 검증에서 거르게 하는지 본다.
+func TestAuthenticate_duplicateActionIgnored(t *testing.T) {
+	fake := &fakeAuthenticator{out: domain.AuthenticateOutput{
+		Credential: domain.Credential{Token: "t", ExpiresAt: time.Unix(0, 0)},
+	}}
+	env := validEnvelope()
+	env.Body = base64.StdEncoding.EncodeToString([]byte("Action=GetCallerIdentity&Action=AssumeRole&Version=2011-06-15"))
+
+	doAuth(newAuthEngine(fake), mustJSON(t, env))
+
+	if !fake.called {
+		t.Fatal("코어가 호출되지 않음")
+	}
+	if got := fake.gotIn.Request.Action; got != "" {
+		t.Errorf("중복 Action 인데 Action = %q, want \"\"(코어가 거르도록)", got)
 	}
 }
 
@@ -192,6 +226,23 @@ func TestAuthenticate_preValidation(t *testing.T) {
 			mutate:     func(e *authRequest) { delete(e.Headers, "X-Server-Binding") },
 			wantStatus: http.StatusForbidden,
 		},
+		{
+			name:       "x-server-binding 대소문자 중복 키",
+			mutate:     func(e *authRequest) { e.Headers["x-server-binding"] = []string{"https://evil.example/aud"} },
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "x-amz-date 대소문자 중복 키",
+			mutate:     func(e *authRequest) { e.Headers["x-amz-date"] = []string{"20260708T120001Z"} },
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "Authorization 중복 값",
+			mutate: func(e *authRequest) {
+				e.Headers["Authorization"] = append(e.Headers["Authorization"], "AWS4-HMAC-SHA256 ...")
+			},
+			wantStatus: http.StatusBadRequest,
+		},
 	}
 
 	for _, tc := range cases {
@@ -224,7 +275,8 @@ func TestAuthenticate_errorMapping(t *testing.T) {
 		{"invalid_shape", &domain.RejectionError{Reason: domain.ReasonInvalidShape, Message: "x"}, http.StatusBadRequest},
 		{"stale", &domain.RejectionError{Reason: domain.ReasonStale, Message: "x"}, http.StatusUnauthorized},
 		{"arn_not_allowed", &domain.RejectionError{Reason: domain.ReasonARNNotAllowed, Message: "x"}, http.StatusForbidden},
-		{"verification_error", &sts.VerificationError{Reason: "서명 무효", HTTPStatus: 403}, http.StatusUnauthorized},
+		{"verification_error(sts wraps domain)", &sts.VerificationError{Reason: "서명 무효", HTTPStatus: 403}, http.StatusUnauthorized},
+		{"verification_rejected(domain)", &domain.VerificationRejected{Reason: "서명 만료"}, http.StatusUnauthorized},
 		{"infra", errors.New("STS 도달 불가"), http.StatusBadGateway},
 	}
 
@@ -256,22 +308,39 @@ func TestAuthenticate_endToEnd(t *testing.T) {
   </GetCallerIdentityResult>
 </GetCallerIdentityResponse>`
 
-	stsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// 흉내 STS 가 받은 요청을 캡처해, 위임된 원본이 재구성 없이 그대로 전달됐는지 확인한다.
+	// round-trip 이 doAuth 반환 전에 끝나지만, 버퍼 채널로 동기화해 -race 에서도 안전하게 읽는다.
+	type captured struct {
+		method  string
+		body    []byte
+		binding string
+	}
+	gotReq := make(chan captured, 1)
+
+	stsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqBody, _ := io.ReadAll(r.Body)
+		gotReq <- captured{method: r.Method, body: reqBody, binding: r.Header.Get("X-Server-Binding")}
 		w.Header().Set("Content-Type", "text/xml")
 		_, _ = io.WriteString(w, stsResp)
 	}))
 	defer stsSrv.Close()
 
-	// 실제 어댑터 Load 가 읽는 viper 를 직접 구성한다. STS 허용 목록은 흉내 서버 URL 로 둔다.
-	v := viper.New()
-	v.Set("policy.binding_value", "https://server.example/audience")
-	v.Set("policy.request_max_age", "5m")
-	v.Set("policy.allowed_arns", "arn:aws:iam::123456789012:role/workload")
-	v.Set("jwt.signing_secret", "sample-only-hs256-secret-change-me-in-real-deployments")
-	v.Set("jwt.ttl", "15m")
-	v.Set("jwt.issuer", "https://server.example")
-	v.Set("jwt.audience", "https://server.example/clients")
-	v.Set("sts.endpoint_allowlist", stsSrv.URL)
+	// 실제 공유 로더와 같은 배선(yaml 파싱 + EnableEnvOverride)을 타는 configtest.Loader 로
+	// viper 를 만든다. STS 허용 목록은 흉내 서버 URL 로 둔다.
+	yamlBody := fmt.Sprintf(`
+policy:
+  binding_value: "https://server.example/audience"
+  request_max_age: "5m"
+  allowed_arns: "arn:aws:iam::123456789012:role/workload"
+jwt:
+  signing_secret: "sample-only-hs256-secret-change-me-in-real-deployments"
+  ttl: "15m"
+  issuer: "https://server.example"
+  audience: "https://server.example/clients"
+sts:
+  endpoint_allowlist: "%s"
+`, stsSrv.URL)
+	v := configtest.Loader(t, yamlBody)
 
 	policy, err := policyconfig.Load(v)
 	if err != nil {
@@ -282,22 +351,25 @@ func TestAuthenticate_endToEnd(t *testing.T) {
 		t.Fatalf("발급 설정 로드 실패: %v", err)
 	}
 	verifier := sts.New(stsSrv.Client(), sts.LoadAllowedEndpoints(v))
-	svc := domain.NewService(policy, clock.New(), verifier, issuer.New(issuerParams))
+
+	// 신선도를 결정적으로 만들려고 고정 시계를 쓴다. X-Amz-Date 를 이 기준 시각으로 두면 age 가
+	// 0 이라 5m 창을 항상 통과한다.
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	svc := domain.NewService(policy, fixedClock{t: base}, verifier, issuer.New(issuerParams))
 	engine := newAuthEngine(svc)
 
-	// X-Amz-Date 는 현재 시각으로 둬 실제 시계 기준 신선도(5m)를 통과시킨다. url 은 흉내 STS.
-	now := time.Now().UTC()
+	const wantBody = "Action=GetCallerIdentity&Version=2011-06-15"
 	env := authRequest{
 		Method: "POST",
 		URL:    stsSrv.URL,
 		Headers: map[string][]string{
 			"Authorization":    {"AWS4-HMAC-SHA256 Credential=AKID/20260708/us-east-1/sts/aws4_request, SignedHeaders=host;x-amz-date;x-server-binding, Signature=abcd"},
-			"X-Amz-Date":       {now.Format(amzDateFormat)},
+			"X-Amz-Date":       {base.Format(amzDateFormat)},
 			"Host":             {"sts.local"},
 			"X-Server-Binding": {"https://server.example/audience"},
 			"Content-Type":     {"application/x-www-form-urlencoded"},
 		},
-		Body: base64.StdEncoding.EncodeToString([]byte("Action=GetCallerIdentity&Version=2011-06-15")),
+		Body: base64.StdEncoding.EncodeToString([]byte(wantBody)),
 	}
 
 	rec := doAuth(engine, mustJSON(t, env))
@@ -314,5 +386,21 @@ func TestAuthenticate_endToEnd(t *testing.T) {
 	}
 	if resp.ExpiresAt == "" {
 		t.Error("expires_at 이 비어 있음")
+	}
+
+	// 위임된 원본이 그대로 전달됐는지 확인한다(포워딩 충실도). 스텁이 채널로 넘긴 값을 읽는다.
+	select {
+	case got := <-gotReq:
+		if got.method != "POST" {
+			t.Errorf("STS 로 위임된 메서드 = %q, want POST", got.method)
+		}
+		if string(got.body) != wantBody {
+			t.Errorf("STS 로 위임된 바디 = %q, want %q", string(got.body), wantBody)
+		}
+		if got.binding != "https://server.example/audience" {
+			t.Errorf("STS 로 위임된 X-Server-Binding = %q", got.binding)
+		}
+	default:
+		t.Error("흉내 STS 가 요청을 받지 못함(위임이 일어나지 않음)")
 	}
 }

@@ -542,3 +542,28 @@ func TestAsVerificationError_wrapped(t *testing.T) {
 		t.Error("감싼 VerificationError 를 풀어내지 못함")
 	}
 }
+
+// TestVerificationError_unwrapsToDomain 은 VerificationError 가 도메인 무자격 에러
+// (*domain.VerificationRejected)로 풀리는지 확인한다. 이 브리지 덕분에 수신 어댑터가 STS
+// 어댑터에 의존하지 않고 domain.AsVerificationRejected 로 무자격을 분류할 수 있다.
+func TestVerificationError_unwrapsToDomain(t *testing.T) {
+	base := &VerificationError{Reason: "서명 무효", HTTPStatus: 403}
+
+	vr, ok := domain.AsVerificationRejected(base)
+	if !ok {
+		t.Fatal("VerificationError 가 domain.VerificationRejected 로 풀리지 않음")
+	}
+	if vr.Reason != "서명 무효" {
+		t.Errorf("Reason = %q, want 서명 무효", vr.Reason)
+	}
+
+	// 감싼 경우에도 풀려야 한다.
+	if _, ok := domain.AsVerificationRejected(errors.Join(errors.New("바깥"), base)); !ok {
+		t.Error("감싼 VerificationError 를 domain 무자격으로 풀어내지 못함")
+	}
+
+	// 일반 인프라 에러는 무자격으로 분류되면 안 된다.
+	if _, ok := domain.AsVerificationRejected(errors.New("전송 실패")); ok {
+		t.Error("일반 에러가 무자격으로 잘못 분류됨")
+	}
+}

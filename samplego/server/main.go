@@ -108,7 +108,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 // buildAuthenticator 는 헥사고날 조립 루트다. 공유 viper 를 로드해 네 개의 아웃바운드
 // 어댑터(정책/시계/STS/발급)를 만들고, 도메인 서비스에 주입해 인바운드 포트를 돌려준다.
-// 설정 로드/검증 실패는 그대로 전파해 부팅 시점에 오설정을 드러낸다.
+// 설정 로드/검증 실패(각 어댑터의 Load, 그리고 STS 허용 목록 공백)는 그대로 전파해 부팅
+// 시점에 오설정을 드러낸다.
 func buildAuthenticator(logger *slog.Logger) (domain.Authenticator, error) {
 	v, err := sharedconfig.Load()
 	if err != nil {
@@ -125,9 +126,16 @@ func buildAuthenticator(logger *slog.Logger) (domain.Authenticator, error) {
 		return nil, err
 	}
 
+	// STS 허용 목록이 비면 sts.New 는 모든 위임을 거부하므로, 서버가 떠도 모든 /auth 가 런타임에
+	// 실패한다. LoadAllowedEndpoints 는 에러를 내지 않으므로(순수 파싱), 조립 루트에서 공백을
+	// 부팅 실패로 승격해 "떠 있지만 아무도 인증 못 하는" 상태를 막는다.
+	allowedEndpoints := sts.LoadAllowedEndpoints(v)
+	if len(allowedEndpoints) == 0 {
+		return nil, errors.New("설정 sts.endpoint_allowlist 가 비어 있음(위임할 STS 엔드포인트가 하나도 없음)")
+	}
+
 	clk := clock.New()
 	httpClient := &http.Client{Timeout: stsRequestTimeout}
-	allowedEndpoints := sts.LoadAllowedEndpoints(v)
 	verifier := sts.New(httpClient, allowedEndpoints)
 	iss := issuer.New(issuerParams)
 

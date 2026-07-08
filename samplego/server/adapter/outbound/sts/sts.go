@@ -97,9 +97,17 @@ func (e *VerificationError) Error() string {
 	return b.String()
 }
 
+// Unwrap 은 이 검증 실패를 도메인 무자격 에러(*domain.VerificationRejected)로 노출한다.
+// 덕분에 수신 어댑터가 STS 어댑터 패키지에 의존하지 않고 domain.AsVerificationRejected 만으로
+// 무자격 응답과 인프라 실패를 가를 수 있다(계층 분리). 어댑터 내부 진단용 필드
+// (HTTPStatus/STSCode/STSMessage)는 이 타입에 그대로 남는다.
+func (e *VerificationError) Unwrap() error {
+	return &domain.VerificationRejected{Reason: e.Reason}
+}
+
 // AsVerificationError 는 err 가(감싸져 있더라도) *VerificationError 인지 검사해 돌려준다.
-// 수신 어댑터가 무자격 응답(검증 실패)과 인프라 실패를 구분하는 데 쓴다.
-// domain.AsRejection 과 짝을 이룬다.
+// 어댑터 내부(테스트/로깅)에서 STS 고유 필드가 필요할 때 쓴다. 수신 어댑터의 무자격 대 인프라
+// 분류는 domain.AsVerificationRejected 로 하며, 이 어댑터에 의존하지 않는다.
 func AsVerificationError(err error) (*VerificationError, bool) {
 	var ve *VerificationError
 	if errors.As(err, &ve) {
