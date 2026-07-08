@@ -1,6 +1,7 @@
 // Command server 는 저장소 README 에서 설명하는 샘플 신뢰 당사자(relying party)
-// 서버다. 지금은 graceful 셧다운을 갖춘 HTTP 서버만 구성하며, PoP/STS 위임
-// 로직은 이후 단계에서 추가한다.
+// 서버다. 조립 루트(buildAuthenticator)에서 공유 설정과 네 개의 아웃바운드 어댑터,
+// 도메인 서비스를 조립해 인바운드 라우터에 주입하고, graceful 셧다운을 갖춘 HTTP
+// 서버로 서빙한다.
 package main
 
 import (
@@ -14,6 +15,12 @@ import (
 	"time"
 
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/inbound"
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/clock"
+	policyconfig "github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/config"
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/issuer"
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/sts"
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
+	sharedconfig "github.com/daengdaenglee/sample-auth-sts/samplego/server/internal/config"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/internal/logging"
 )
 
@@ -25,6 +32,10 @@ const (
 	// shutdownTimeout 은 graceful 셧다운 시 처리 중인 요청이 빠질 때까지
 	// 기다리는 최대 시간을 제한한다.
 	shutdownTimeout = 10 * time.Second
+
+	// stsRequestTimeout 은 STS 위임 요청 한 건의 최대 소요 시간이다. STS 어댑터에
+	// 주입할 http.Client 에 걸어, 응답이 없을 때 인증 요청이 무한정 매달리지 않게 한다.
+	stsRequestTimeout = 10 * time.Second
 )
 
 func main() {
@@ -52,9 +63,16 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		addr = v
 	}
 
+	// 조립 루트: 공유 설정을 한 번 로드해 각 어댑터 Load 로 넘기고, 도메인 서비스에 주입한다.
+	// 오설정은 각 Load 에서 에러로 드러나므로, 서버가 뜨기 전에 부팅을 실패시킨다.
+	auth, err := buildAuthenticator(logger)
+	if err != nil {
+		return err
+	}
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: inbound.NewRouter(logger),
+		Handler: inbound.NewRouter(logger, auth),
 	}
 
 	// 메인 흐름이 신호 또는 시작/서빙 에러 중 하나를 기다릴 수 있도록
@@ -86,4 +104,46 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	logger.Info("server stopped")
 	return nil
+}
+
+// buildAuthenticator 는 헥사고날 조립 루트다. 공유 viper 를 로드해 네 개의 아웃바운드
+// 어댑터(정책/시계/STS/발급)를 만들고, 도메인 서비스에 주입해 인바운드 포트를 돌려준다.
+// 각 어댑터의 로드/검증 실패(정책/발급의 Load, STS 의 NewVerifier -- 유효한 https 엔드포인트
+// 없음)는 그대로 전파해 부팅 시점에 오설정을 드러낸다.
+func buildAuthenticator(logger *slog.Logger) (domain.Authenticator, error) {
+	v, err := sharedconfig.Load()
+	if err != nil {
+		return nil, err
+	}
+
+	policy, err := policyconfig.Load(v)
+	if err != nil {
+		return nil, err
+	}
+
+	issuerParams, err := issuer.Load(v)
+	if err != nil {
+		return nil, err
+	}
+
+	clk := clock.New()
+	httpClient := &http.Client{Timeout: stsRequestTimeout}
+
+	// NewVerifier 는 허용 엔드포인트를 읽어 Verifier 를 만들고, 정규화를 통과한 유효 엔드포인트가
+	// 하나도 없으면(공백뿐 아니라 https 아님 같은 오설정 포함) 에러로 부팅을 실패시킨다.
+	// "떠 있지만 모든 /auth 가 401 로 실패하는" 상태를 어댑터 경계에서 막는다.
+	verifier, err := sts.NewVerifier(httpClient, v)
+	if err != nil {
+		return nil, err
+	}
+
+	iss := issuer.New(issuerParams)
+
+	logger.Info("composition root assembled",
+		slog.Int("sts_endpoint_count", verifier.AllowedEndpointCount()),
+		slog.Duration("sts_timeout", stsRequestTimeout),
+	)
+
+	// NewService 의 위치 인자 순서: 정책/시계 -> 신원 검증 -> 자격 발급.
+	return domain.NewService(policy, clk, verifier, iss), nil
 }

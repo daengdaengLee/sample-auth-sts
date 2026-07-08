@@ -47,3 +47,29 @@ func AsRejection(err error) (*RejectionError, bool) {
 	}
 	return nil, false
 }
+
+// VerificationRejected 는 신원 검증 포트(IdentityVerifier)가 "무자격"(클라이언트측 거절)을
+// 나타낼 때 쓰는 도메인 에러다. 코어는 verifier 에러를 그대로 전파하므로, 수신 어댑터는 이
+// 타입 여부로 무자격 응답과 인프라 실패를 가른다. 아웃바운드 어댑터(STS 등)는 이 타입을
+// (감싸서라도) 반환해, 수신 어댑터가 특정 어댑터 패키지에 의존하지 않고 도메인 타입만으로
+// 분류하게 한다. domain.RejectionError(로컬 검증 거부)와 짝을 이루되, 그쪽은 코어의 로컬
+// 판단이고 이쪽은 위임 검증 결과다.
+type VerificationRejected struct {
+	// Reason 은 검증이 거절된 이유의 짧은 식별자다(로그/디버깅용).
+	Reason string
+}
+
+// Error 는 error 인터페이스를 만족시킨다.
+func (e *VerificationRejected) Error() string {
+	return "신원 검증 거절: " + e.Reason
+}
+
+// AsVerificationRejected 는 err 가(감싸져 있더라도) *VerificationRejected 인지 검사해 돌려준다.
+// 수신 어댑터가 무자격 응답과 인프라 실패를 구분하는 데 쓴다.
+func AsVerificationRejected(err error) (*VerificationRejected, bool) {
+	var ve *VerificationRejected
+	if errors.As(err, &ve) {
+		return ve, true
+	}
+	return nil, false
+}

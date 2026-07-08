@@ -9,12 +9,15 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
 )
 
 // NewRouter 는 slog 기반 요청 로거, 패닉 복구, 그리고 서버가 노출하는 라우트를
 // 등록한 gin 엔진을 만들어 반환한다. main 은 이 엔진을 http.Server 의 핸들러로
-// 사용한다.
-func NewRouter(logger *slog.Logger) *gin.Engine {
+// 사용한다. auth 는 조립 지점에서 주입하는 인바운드 포트로, /auth 핸들러가
+// 파싱한 서명 요청을 이 포트로 넘긴다.
+func NewRouter(logger *slog.Logger, auth domain.Authenticator) *gin.Engine {
 	engine := gin.New()
 
 	// 직접 연결된 TCP 피어만 신뢰한다: X-Forwarded-For/X-Real-IP 를 무시해
@@ -26,10 +29,10 @@ func NewRouter(logger *slog.Logger) *gin.Engine {
 	// 공유하도록 한다.
 	engine.Use(RequestID(), requestLogger(logger), gin.Recovery())
 
-	h := NewHandler(logger)
+	h := NewHandler(logger, auth)
 
-	// /healthz 는 운영용 헬스체크다. /auth 와 /verify 는 README 설계의 기능
-	// 엔드포인트로, 코어/PoP/STS 로직이 붙기 전까지는 501 스텁으로 둔다.
+	// /healthz 는 운영용 헬스체크다. /auth 는 서명된 요청을 코어로 넘겨 인증을
+	// 수행한다. /verify 는 발급 JWT 검증 엔드포인트로, 아직 501 스텁이다.
 	engine.GET("/healthz", h.Health)
 	engine.POST("/auth", h.Authenticate)
 	engine.POST("/verify", h.Verify)
@@ -37,30 +40,22 @@ func NewRouter(logger *slog.Logger) *gin.Engine {
 	return engine
 }
 
-// Handler 는 수신 어댑터의 HTTP 핸들러 묶음이다. 지금은 logger 만 갖지만, 이후
-// 인바운드 포트("인증 요청을 처리한다" 유스케이스) 등 코어 의존성을 여기에
-// 주입해 각 핸들러가 파싱한 값을 코어로 넘기게 된다.
+// Handler 는 수신 어댑터의 HTTP 핸들러 묶음이다. logger 와 함께 인바운드 포트
+// (도메인 Authenticator)를 주입받아, 각 핸들러가 HTTP 요청에서 파싱한 값을
+// 코어로 넘긴다.
 type Handler struct {
 	logger *slog.Logger
+	auth   domain.Authenticator
 }
 
-// NewHandler 는 주어진 로거로 Handler 를 만든다.
-func NewHandler(logger *slog.Logger) *Handler {
-	return &Handler{logger: logger}
+// NewHandler 는 주어진 로거와 인바운드 포트로 Handler 를 만든다.
+func NewHandler(logger *slog.Logger, auth domain.Authenticator) *Handler {
+	return &Handler{logger: logger, auth: auth}
 }
 
 // Health 는 운영용 헬스체크 응답을 반환한다.
 func (h *Handler) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-}
-
-// Authenticate 는 서명된 GetCallerIdentity 요청을 받아 인증을 처리하는
-// 엔드포인트다. 이후 여기서 바인딩 헤더 값/메서드/바디/액션/서명 시각을 추출하고
-// 원본 서명 요청을 보존한 뒤 인바운드 포트를 호출하게 된다. 코어가 붙기 전까지는
-// 501 스텁이다.
-func (h *Handler) Authenticate(c *gin.Context) {
-	h.logger.InfoContext(c.Request.Context(), "authenticate 요청 수신 (미구현)")
-	c.JSON(http.StatusNotImplemented, gin.H{"status": "not_implemented"})
 }
 
 // Verify 는 서버가 발급한 JWT 의 유효성(서명/만료)과 클레임을 검증하는

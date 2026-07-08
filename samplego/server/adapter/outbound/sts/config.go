@@ -11,7 +11,8 @@ import (
 // 받으며, 미설정/빈 값이면 아무 엔드포인트도 허용하지 않는다(전부 거부). 서버별로 위임
 // 대상을 명시해야 하므로 안전한 기본값을 두지 않는다. 환경변수로 덮어쓸 때는
 // STS_ENDPOINT_ALLOWLIST 다(공유 로더가 점을 밑줄로 바꿔 대조). 파일값과 환경변수
-// override 의 파싱 의미를 일치시키려고 슬라이스가 아니라 쉼표 문자열로 받는다.
+// override 의 파싱 의미를 일치시키려고 슬라이스가 아니라 쉼표 문자열로 받는다. 오설정
+// 검증(유효 엔드포인트 없음)은 NewVerifier 가 이 패키지 안에서 맡으므로 키는 비공개로 둔다.
 const keyAllowedEndpoints = "sts.endpoint_allowlist"
 
 // LoadAllowedEndpoints 는 공유 viper 에서 STS 엔드포인트 허용 목록을 쉼표로 갈라, 앞뒤

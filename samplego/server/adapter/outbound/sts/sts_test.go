@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/viper"
+
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
 )
 
@@ -155,7 +157,7 @@ func TestVerifyIdentity_endpointNotAllowed(t *testing.T) {
 	if err == nil {
 		t.Fatal("허용 목록 밖 엔드포인트인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); !ok {
+	if _, ok := asVerificationError(err); !ok {
 		t.Errorf("검증 실패 타입이 아님: %v", err)
 	}
 	if hit {
@@ -179,7 +181,7 @@ func TestVerifyIdentity_stsRejects(t *testing.T) {
 	if err == nil {
 		t.Fatal("STS 가 거절했는데 에러가 나지 않음")
 	}
-	ve, ok := AsVerificationError(err)
+	ve, ok := asVerificationError(err)
 	if !ok {
 		t.Fatalf("검증 실패 타입이 아님: %v", err)
 	}
@@ -210,7 +212,7 @@ func TestVerifyIdentity_throttlingIsInfra(t *testing.T) {
 	if err == nil {
 		t.Fatal("스로틀링인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("스로틀링(400 Throttling)이 무자격으로 잘못 분류됨: %v", err)
 	}
 }
@@ -229,7 +231,7 @@ func TestVerifyIdentity_tooManyRequestsIsInfra(t *testing.T) {
 	if err == nil {
 		t.Fatal("429 인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("429 가 무자격으로 잘못 분류됨: %v", err)
 	}
 }
@@ -248,7 +250,7 @@ func TestVerifyIdentity_stsServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("STS 5xx 인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("STS 5xx 가 검증 실패로 잘못 분류됨: %v", err)
 	}
 }
@@ -275,7 +277,7 @@ func TestVerifyIdentity_redirectNotFollowed(t *testing.T) {
 	if err == nil {
 		t.Fatal("리다이렉트 응답인데 에러가 나지 않음(따라간 것으로 보임)")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("리다이렉트가 무자격으로 잘못 분류됨: %v", err)
 	}
 	if finalHit {
@@ -297,7 +299,7 @@ func TestVerifyIdentity_transportError(t *testing.T) {
 	if err == nil {
 		t.Fatal("전송이 실패해야 하는데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("전송 실패가 검증 실패로 잘못 분류됨: %v", err)
 	}
 }
@@ -316,7 +318,7 @@ func TestVerifyIdentity_unparsableSuccess(t *testing.T) {
 	if err == nil {
 		t.Fatal("파싱 불가 응답인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("파싱 실패가 검증 실패로 잘못 분류됨: %v", err)
 	}
 }
@@ -335,7 +337,7 @@ func TestVerifyIdentity_oversizeBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("상한 초과 본문인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); ok {
+	if _, ok := asVerificationError(err); ok {
 		t.Errorf("상한 초과가 무자격으로 잘못 분류됨: %v", err)
 	}
 }
@@ -358,7 +360,7 @@ func TestVerifyIdentity_oversizeRejectionKeepsStatus(t *testing.T) {
 	if err == nil {
 		t.Fatal("초과 본문 4xx 인데 에러가 나지 않음")
 	}
-	ve, ok := AsVerificationError(err)
+	ve, ok := asVerificationError(err)
 	if !ok {
 		t.Fatalf("초과 본문 4xx 가 상태 기반 무자격으로 분류되지 않음(상한 오류로 새어나감?): %v", err)
 	}
@@ -407,7 +409,7 @@ func TestVerifyIdentity_invalidTargetURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("무효 URL 인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); !ok {
+	if _, ok := asVerificationError(err); !ok {
 		t.Errorf("무효 URL 이 검증 실패로 분류되지 않음: %v", err)
 	}
 }
@@ -422,7 +424,7 @@ func TestVerifyIdentity_httpTargetRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("http 대상인데 에러가 나지 않음")
 	}
-	if _, ok := AsVerificationError(err); !ok {
+	if _, ok := asVerificationError(err); !ok {
 		t.Errorf("http 대상이 검증 실패로 거부되지 않음: %v", err)
 	}
 }
@@ -533,12 +535,96 @@ func TestNew_endpointNormalization(t *testing.T) {
 	}
 }
 
-// TestAsVerificationError_wrapped 는 AsVerificationError 가 감싼 에러도 풀어내는지
+// TestAllowedEndpointCount 는 정규화를 통과한 유효 엔드포인트만 세는지 확인한다. 원시 입력
+// 개수로 되돌리면(부팅 게이트 회귀) http/무효/중복 케이스가 깨진다.
+func TestAllowedEndpointCount(t *testing.T) {
+	cases := []struct {
+		name      string
+		endpoints []string
+		want      int
+	}{
+		{"빈 목록", nil, 0},
+		{"http 만(https 아님)", []string{"http://sts.local"}, 0},
+		{"파싱 불가", []string{"://bad"}, 0},
+		{"유효 1개", []string{"https://sts.amazonaws.com"}, 1},
+		{"유효+무효 혼합", []string{"http://x", "https://sts.amazonaws.com"}, 1},
+		{"포트/후행점 정규화 중복", []string{"https://sts.example", "https://sts.example.:443"}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := New(nil, tc.endpoints).AllowedEndpointCount(); got != tc.want {
+				t.Errorf("AllowedEndpointCount() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewVerifier 는 NewVerifier 고유 책임(정규화된 유효 엔드포인트 개수를 에러로 번역)만
+// 검증한다. 정규화 필터링은 TestAllowedEndpointCount, 빈 입력 파싱은 config_test 의
+// TestLoadAllowedEndpoints_empty 가 이미 커버하므로 여기서는 중복하지 않는다. 에러 케이스는
+// http 만(원시 개수는 1, 정규화 개수는 0)으로 둬, 게이트가 정규화 개수로 도는지도 함께 보증한다.
+func TestNewVerifier(t *testing.T) {
+	cases := []struct {
+		name      string
+		allowlist string
+		wantErr   bool
+	}{
+		{"유효 엔드포인트 없음(http 만)", "http://sts.local", true},
+		{"유효", "https://sts.amazonaws.com", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := viper.New()
+			v.Set("sts.endpoint_allowlist", tc.allowlist)
+
+			verifier, err := NewVerifier(nil, v)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("에러를 기대했으나 nil (verifier=%v)", verifier)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("예상치 못한 에러: %v", err)
+			}
+			if verifier == nil {
+				t.Fatal("verifier 가 nil")
+			}
+		})
+	}
+}
+
+// TestAsVerificationError_wrapped 는 asVerificationError 가 감싼 에러도 풀어내는지
 // (errors.As 경유) 최소 sanity 를 본다.
 func TestAsVerificationError_wrapped(t *testing.T) {
 	base := &VerificationError{Reason: "테스트"}
 	wrapped := errors.Join(errors.New("바깥"), base)
-	if _, ok := AsVerificationError(wrapped); !ok {
+	if _, ok := asVerificationError(wrapped); !ok {
 		t.Error("감싼 VerificationError 를 풀어내지 못함")
+	}
+}
+
+// TestVerificationError_unwrapsToDomain 은 VerificationError 가 도메인 무자격 에러
+// (*domain.VerificationRejected)로 풀리는지 확인한다. 이 브리지 덕분에 수신 어댑터가 STS
+// 어댑터에 의존하지 않고 domain.AsVerificationRejected 로 무자격을 분류할 수 있다.
+func TestVerificationError_unwrapsToDomain(t *testing.T) {
+	base := &VerificationError{Reason: "서명 무효", HTTPStatus: 403}
+
+	vr, ok := domain.AsVerificationRejected(base)
+	if !ok {
+		t.Fatal("VerificationError 가 domain.VerificationRejected 로 풀리지 않음")
+	}
+	if vr.Reason != "서명 무효" {
+		t.Errorf("Reason = %q, want 서명 무효", vr.Reason)
+	}
+
+	// 감싼 경우에도 풀려야 한다.
+	if _, ok := domain.AsVerificationRejected(errors.Join(errors.New("바깥"), base)); !ok {
+		t.Error("감싼 VerificationError 를 domain 무자격으로 풀어내지 못함")
+	}
+
+	// 일반 인프라 에러는 무자격으로 분류되면 안 된다.
+	if _, ok := domain.AsVerificationRejected(errors.New("전송 실패")); ok {
+		t.Error("일반 에러가 무자격으로 잘못 분류됨")
 	}
 }

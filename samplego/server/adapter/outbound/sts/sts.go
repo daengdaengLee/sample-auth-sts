@@ -25,6 +25,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/spf13/viper"
+
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
 )
 
@@ -62,10 +64,12 @@ func isTransientCode(code string) bool {
 // 매핑되어야 하는 "검증 실패"이며, 전송 실패/STS 5xx/응답 파싱 불가 같은 인프라 실패와
 // 구분된다(그쪽은 이 타입이 아닌 일반 에러로 전파된다).
 //
-// 도메인 코어(service.go)는 verifier 에러를 거부가 아니라 그대로 전파하므로, 이후
-// 수신 어댑터가 이 타입 여부로 무자격(4xx) 대 인프라 실패(5xx)를 갈라 응답 상태를
-// 정한다. domain.RejectionError 와 같은 역할을 어댑터 경계에서 맡되, 새 도메인
-// RejectionReason 을 늘리지 않고 어댑터 계층에 가둔다.
+// 도메인 코어(service.go)는 verifier 에러를 거부가 아니라 그대로 전파한다. 이 타입은
+// STS 고유 진단 필드(HTTPStatus/STSCode/STSMessage)를 담아 어댑터 안에서의 로그/디버깅에
+// 쓰고, Unwrap 으로 domain.VerificationRejected 를 노출한다. 그래서 수신 어댑터는 이 어댑터
+// 패키지를 import 하지 않고 domain.AsVerificationRejected 만으로 무자격(4xx) 대 인프라
+// 실패(5xx)를 가른다(계층 분리). 무자격 분류라는 개념 자체는 도메인이 소유하고, 이 타입은
+// 그 도메인 개념에 STS 세부를 얹은 어댑터측 표현이다.
 type VerificationError struct {
 	// Reason 은 검증이 실패한 이유의 짧은 식별자다(로그/디버깅용).
 	Reason string
@@ -97,10 +101,19 @@ func (e *VerificationError) Error() string {
 	return b.String()
 }
 
-// AsVerificationError 는 err 가(감싸져 있더라도) *VerificationError 인지 검사해 돌려준다.
-// 수신 어댑터가 무자격 응답(검증 실패)과 인프라 실패를 구분하는 데 쓴다.
-// domain.AsRejection 과 짝을 이룬다.
-func AsVerificationError(err error) (*VerificationError, bool) {
+// Unwrap 은 이 검증 실패를 도메인 무자격 에러(*domain.VerificationRejected)로 노출한다.
+// 덕분에 수신 어댑터가 STS 어댑터 패키지에 의존하지 않고 domain.AsVerificationRejected 만으로
+// 무자격 응답과 인프라 실패를 가를 수 있다(계층 분리). 어댑터 내부 진단용 필드
+// (HTTPStatus/STSCode/STSMessage)는 이 타입에 그대로 남는다.
+func (e *VerificationError) Unwrap() error {
+	return &domain.VerificationRejected{Reason: e.Reason}
+}
+
+// asVerificationError 는 err 가(감싸져 있더라도) *VerificationError 인지 검사해 돌려주는
+// 어댑터 내부 헬퍼다. STS 고유 필드(HTTPStatus/STSCode 등)까지 확인하는 이 패키지의 테스트가
+// 쓴다. 수신 어댑터의 무자격 대 인프라 분류는 domain.AsVerificationRejected 로 하므로, 이
+// 함수는 공개할 필요가 없다(언익스포트).
+func asVerificationError(err error) (*VerificationError, bool) {
 	var ve *VerificationError
 	if errors.As(err, &ve) {
 		return ve, true
@@ -163,6 +176,26 @@ func New(client *http.Client, allowedEndpoints []string) *Verifier {
 	}
 
 	return &Verifier{client: &noRedirect, allowed: allowed}
+}
+
+// NewVerifier 는 공유 viper 에서 허용 엔드포인트를 읽어 Verifier 를 만들고, 정규화를 통과한
+// 유효 엔드포인트가 하나도 없으면 에러를 반환한다. 형제 어댑터(정책/발급)의 Load 가 자기
+// 오설정을 부팅 시점에 드러내는 것과 같은 톤으로, "유효한 위임 대상 없음" 불변식을 이 패키지
+// 안에서 소유한다. 목록을 직접 주입하는 저수준 New 는 테스트/특수 조립용으로 유지한다.
+func NewVerifier(client *http.Client, v *viper.Viper) (*Verifier, error) {
+	verifier := New(client, LoadAllowedEndpoints(v))
+	if verifier.AllowedEndpointCount() == 0 {
+		return nil, fmt.Errorf("설정 %s 에 유효한 https STS 엔드포인트가 하나도 없음", keyAllowedEndpoints)
+	}
+	return verifier, nil
+}
+
+// AllowedEndpointCount 는 정규화를 통과해 실제로 허용되는 STS 엔드포인트 수를 돌려준다.
+// NewVerifier 가 이 값으로 "유효한 위임 대상이 하나도 없는" 오설정을 부팅 시점에 가르고,
+// 조립 루트는 로그에도 쓴다. 원시 입력 개수(LoadAllowedEndpoints 결과)와 달리, https 아님/
+// 파싱 불가로 버려진 항목은 세지 않으므로 런타임 거부 동작과 일치한다.
+func (v *Verifier) AllowedEndpointCount() int {
+	return len(v.allowed)
 }
 
 // VerifyIdentity 는 보존된 원본 서명 요청을 허용된 STS 엔드포인트로 그대로 전달하고,
