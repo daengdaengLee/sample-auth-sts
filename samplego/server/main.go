@@ -65,14 +65,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// 조립 루트: 공유 설정을 한 번 로드해 각 어댑터 Load 로 넘기고, 도메인 서비스에 주입한다.
 	// 오설정은 각 Load 에서 에러로 드러나므로, 서버가 뜨기 전에 부팅을 실패시킨다.
-	auth, err := buildAuthenticator(logger)
+	auth, verify, err := buildServices(logger)
 	if err != nil {
 		return err
 	}
 
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: inbound.NewRouter(logger, auth),
+		Handler: inbound.NewRouter(logger, auth, verify),
 	}
 
 	// 메인 흐름이 신호 또는 시작/서빙 에러 중 하나를 기다릴 수 있도록
@@ -106,24 +106,25 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	return nil
 }
 
-// buildAuthenticator 는 헥사고날 조립 루트다. 공유 viper 를 로드해 네 개의 아웃바운드
-// 어댑터(정책/시계/STS/발급)를 만들고, 도메인 서비스에 주입해 인바운드 포트를 돌려준다.
-// 각 어댑터의 로드/검증 실패(정책/발급의 Load, STS 의 NewVerifier -- 유효한 https 엔드포인트
-// 없음)는 그대로 전파해 부팅 시점에 오설정을 드러낸다.
-func buildAuthenticator(logger *slog.Logger) (domain.Authenticator, error) {
+// buildServices 는 헥사고날 조립 루트다. 공유 viper 를 한 번 로드해 아웃바운드 어댑터
+// (정책/시계/STS/발급/토큰 검사)를 만들고, 두 도메인 서비스에 주입해 인바운드 포트 두 개
+// (/auth 의 Authenticator, /verify 의 TokenVerifier)를 돌려준다. 각 어댑터의 로드/검증 실패
+// (정책/발급의 Load, STS 의 NewVerifier -- 유효한 https 엔드포인트 없음)는 그대로 전파해 부팅
+// 시점에 오설정을 드러낸다. 시계(clk)와 발급 설정(issuerParams)은 두 경로가 공유한다.
+func buildServices(logger *slog.Logger) (domain.Authenticator, domain.TokenVerifier, error) {
 	v, err := sharedconfig.Load()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	policy, err := policyconfig.Load(v)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	issuerParams, err := issuer.Load(v)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	clk := clock.New()
@@ -134,10 +135,15 @@ func buildAuthenticator(logger *slog.Logger) (domain.Authenticator, error) {
 	// "떠 있지만 모든 /auth 가 401 로 실패하는" 상태를 어댑터 경계에서 막는다.
 	verifier, err := sts.NewVerifier(httpClient, v)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	iss := issuer.New(issuerParams)
+
+	// /verify 배선: 발급과 같은 시크릿으로 서명을 재검증하는 검사기와, 발급 설정의 iss/aud
+	// 기대값으로 만료/발급자/대상을 판단하는 검증 서비스를 조립한다.
+	inspector := issuer.NewInspector(issuerParams)
+	tokenVerifier := domain.NewVerifyService(clk, inspector, issuerParams.Issuer, issuerParams.Audience)
 
 	logger.Info("composition root assembled",
 		slog.Int("sts_endpoint_count", verifier.AllowedEndpointCount()),
@@ -145,5 +151,5 @@ func buildAuthenticator(logger *slog.Logger) (domain.Authenticator, error) {
 	)
 
 	// NewService 의 위치 인자 순서: 정책/시계 -> 신원 검증 -> 자격 발급.
-	return domain.NewService(policy, clk, verifier, iss), nil
+	return domain.NewService(policy, clk, verifier, iss), tokenVerifier, nil
 }

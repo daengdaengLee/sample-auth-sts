@@ -15,9 +15,9 @@ import (
 
 // NewRouter 는 slog 기반 요청 로거, 패닉 복구, 그리고 서버가 노출하는 라우트를
 // 등록한 gin 엔진을 만들어 반환한다. main 은 이 엔진을 http.Server 의 핸들러로
-// 사용한다. auth 는 조립 지점에서 주입하는 인바운드 포트로, /auth 핸들러가
-// 파싱한 서명 요청을 이 포트로 넘긴다.
-func NewRouter(logger *slog.Logger, auth domain.Authenticator) *gin.Engine {
+// 사용한다. auth/verify 는 조립 지점에서 주입하는 인바운드 포트로, /auth 핸들러는
+// 파싱한 서명 요청을 auth 로, /verify 핸들러는 파싱한 토큰을 verify 로 넘긴다.
+func NewRouter(logger *slog.Logger, auth domain.Authenticator, verify domain.TokenVerifier) *gin.Engine {
 	engine := gin.New()
 
 	// 직접 연결된 TCP 피어만 신뢰한다: X-Forwarded-For/X-Real-IP 를 무시해
@@ -29,10 +29,10 @@ func NewRouter(logger *slog.Logger, auth domain.Authenticator) *gin.Engine {
 	// 공유하도록 한다.
 	engine.Use(RequestID(), requestLogger(logger), gin.Recovery())
 
-	h := NewHandler(logger, auth)
+	h := NewHandler(logger, auth, verify)
 
 	// /healthz 는 운영용 헬스체크다. /auth 는 서명된 요청을 코어로 넘겨 인증을
-	// 수행한다. /verify 는 발급 JWT 검증 엔드포인트로, 아직 501 스텁이다.
+	// 수행한다. /verify 는 서버가 발급한 JWT 를 코어로 넘겨 검증한다.
 	engine.GET("/healthz", h.Health)
 	engine.POST("/auth", h.Authenticate)
 	engine.POST("/verify", h.Verify)
@@ -40,27 +40,21 @@ func NewRouter(logger *slog.Logger, auth domain.Authenticator) *gin.Engine {
 	return engine
 }
 
-// Handler 는 수신 어댑터의 HTTP 핸들러 묶음이다. logger 와 함께 인바운드 포트
-// (도메인 Authenticator)를 주입받아, 각 핸들러가 HTTP 요청에서 파싱한 값을
-// 코어로 넘긴다.
+// Handler 는 수신 어댑터의 HTTP 핸들러 묶음이다. logger 와 함께 두 인바운드 포트
+// (도메인 Authenticator/TokenVerifier)를 주입받아, 각 핸들러가 HTTP 요청에서 파싱한
+// 값을 알맞은 코어 유스케이스로 넘긴다.
 type Handler struct {
 	logger *slog.Logger
 	auth   domain.Authenticator
+	verify domain.TokenVerifier
 }
 
-// NewHandler 는 주어진 로거와 인바운드 포트로 Handler 를 만든다.
-func NewHandler(logger *slog.Logger, auth domain.Authenticator) *Handler {
-	return &Handler{logger: logger, auth: auth}
+// NewHandler 는 주어진 로거와 두 인바운드 포트로 Handler 를 만든다.
+func NewHandler(logger *slog.Logger, auth domain.Authenticator, verify domain.TokenVerifier) *Handler {
+	return &Handler{logger: logger, auth: auth, verify: verify}
 }
 
 // Health 는 운영용 헬스체크 응답을 반환한다.
 func (h *Handler) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-}
-
-// Verify 는 서버가 발급한 JWT 의 유효성(서명/만료)과 클레임을 검증하는
-// 엔드포인트다. 검증 로직이 붙기 전까지는 501 스텁이다.
-func (h *Handler) Verify(c *gin.Context) {
-	h.logger.InfoContext(c.Request.Context(), "verify 요청 수신 (미구현)")
-	c.JSON(http.StatusNotImplemented, gin.H{"status": "not_implemented"})
 }

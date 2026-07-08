@@ -109,10 +109,16 @@ func encodeSegment(v any) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// sign 은 서명 입력(header.payload)에 시크릿으로 HMAC-SHA256 서명을 계산해 base64url(no pad)
-// 로 돌려준다.
+// sign 은 서명 입력(header.payload)에 자신의 시크릿으로 HMAC-SHA256 서명을 계산한다.
 func (i *Issuer) sign(signingInput string) string {
-	m := hmac.New(sha256.New, i.secret)
+	return signWith(i.secret, signingInput)
+}
+
+// signWith 는 시크릿으로 서명 입력(header.payload)에 HMAC-SHA256 서명을 계산해 base64url
+// (no pad)로 돌려준다. 발급(Issuer)과 검증(Inspector)이 같은 서명 계산을 공유하도록, 시크릿을
+// 인자로 받는 패키지 함수로 둔다.
+func signWith(secret []byte, signingInput string) string {
+	m := hmac.New(sha256.New, secret)
 	m.Write([]byte(signingInput))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }

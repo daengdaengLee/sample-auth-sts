@@ -47,9 +47,10 @@ func (f *fakeAuthenticator) Authenticate(_ context.Context, in domain.Authentica
 	return f.out, f.err
 }
 
-// newAuthEngine 은 대역 포트를 주입한 라우터를 만든다. 로그는 버린다.
+// newAuthEngine 은 대역 포트를 주입한 라우터를 만든다. 로그는 버린다. /auth 테스트는 검증
+// 포트를 쓰지 않으므로 verify 는 nil 로 둔다.
 func newAuthEngine(auth domain.Authenticator) *gin.Engine {
-	return NewRouter(logging.New(io.Discard, slog.LevelInfo), auth)
+	return NewRouter(logging.New(io.Discard, slog.LevelInfo), auth, nil)
 }
 
 // doAuth 는 주어진 JSON 본문으로 /auth 를 호출한 결과를 돌려준다.
