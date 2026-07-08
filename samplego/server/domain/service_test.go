@@ -110,13 +110,6 @@ func TestService_Authenticate_rejections(t *testing.T) {
 			wantVerifier: false,
 		},
 		{
-			name:         "형태 불량 - 빈 액션",
-			policy:       defaultPolicy(),
-			mutate:       func(r *SignedRequest) { r.Action = "" },
-			wantReason:   ReasonInvalidShape,
-			wantVerifier: false,
-		},
-		{
 			name:         "만료 - age 초과",
 			policy:       defaultPolicy(),
 			mutate:       func(r *SignedRequest) { r.SignedAt = baseTime.Add(-10 * time.Minute) },

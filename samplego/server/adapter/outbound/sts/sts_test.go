@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/viper"
+
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
 )
 
@@ -530,6 +532,66 @@ func TestNew_endpointNormalization(t *testing.T) {
 	}
 	if !hit {
 		t.Error("정규화 후에도 허용된 엔드포인트로 요청이 나가지 않음")
+	}
+}
+
+// TestAllowedEndpointCount 는 정규화를 통과한 유효 엔드포인트만 세는지 확인한다. 원시 입력
+// 개수로 되돌리면(부팅 게이트 회귀) http/무효/중복 케이스가 깨진다.
+func TestAllowedEndpointCount(t *testing.T) {
+	cases := []struct {
+		name      string
+		endpoints []string
+		want      int
+	}{
+		{"빈 목록", nil, 0},
+		{"http 만(https 아님)", []string{"http://sts.local"}, 0},
+		{"파싱 불가", []string{"://bad"}, 0},
+		{"유효 1개", []string{"https://sts.amazonaws.com"}, 1},
+		{"유효+무효 혼합", []string{"http://x", "https://sts.amazonaws.com"}, 1},
+		{"포트/후행점 정규화 중복", []string{"https://sts.example", "https://sts.example.:443"}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := New(nil, tc.endpoints).AllowedEndpointCount(); got != tc.want {
+				t.Errorf("AllowedEndpointCount() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewVerifier 는 유효 엔드포인트가 없으면(공백/https 아님) 에러로 부팅을 막고, 있으면
+// Verifier 를 주는지 확인한다(조립 루트의 부팅 게이트를 어댑터 레벨에서 종단 검증).
+func TestNewVerifier(t *testing.T) {
+	cases := []struct {
+		name      string
+		allowlist string
+		wantErr   bool
+	}{
+		{"미설정", "", true},
+		{"http 만", "http://sts.local", true},
+		{"공백만", "   ,  ", true},
+		{"유효", "https://sts.amazonaws.com", false},
+		{"유효+무효 혼합", "http://x, https://sts.amazonaws.com", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := viper.New()
+			v.Set("sts.endpoint_allowlist", tc.allowlist)
+
+			verifier, err := NewVerifier(nil, v)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("에러를 기대했으나 nil (verifier=%v)", verifier)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("예상치 못한 에러: %v", err)
+			}
+			if verifier == nil {
+				t.Fatal("verifier 가 nil")
+			}
+		})
 	}
 }
 

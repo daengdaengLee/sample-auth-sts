@@ -412,6 +412,7 @@ sts:
 		Iss string `json:"iss"`
 		Sub string `json:"sub"`
 		Aud string `json:"aud"`
+		Iat int64  `json:"iat"`
 		Exp int64  `json:"exp"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
@@ -426,8 +427,10 @@ sts:
 	if claims.Sub != "arn:aws:iam::123456789012:role/workload" {
 		t.Errorf("sub = %q, want 검증된 ARN", claims.Sub)
 	}
-	if claims.Exp <= 0 {
-		t.Errorf("exp = %d, want > 0", claims.Exp)
+	// exp - iat 로 ttl 배선을 검증한다. yaml 의 jwt.ttl 은 15m 이고 issuer 가 iat/exp 를 초
+	// 단위로 계산하므로 차이는 정확히 900 이다(exp>0 만 보면 ttl 오배선을 놓친다).
+	if got := claims.Exp - claims.Iat; got != 900 {
+		t.Errorf("exp - iat = %d, want 900 (jwt.ttl=15m)", got)
 	}
 	if resp.ExpiresAt == "" {
 		t.Error("expires_at 이 비어 있음")

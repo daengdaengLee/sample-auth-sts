@@ -25,6 +25,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/spf13/viper"
+
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
 )
 
@@ -176,10 +178,22 @@ func New(client *http.Client, allowedEndpoints []string) *Verifier {
 	return &Verifier{client: &noRedirect, allowed: allowed}
 }
 
+// NewVerifier 는 공유 viper 에서 허용 엔드포인트를 읽어 Verifier 를 만들고, 정규화를 통과한
+// 유효 엔드포인트가 하나도 없으면 에러를 반환한다. 형제 어댑터(정책/발급)의 Load 가 자기
+// 오설정을 부팅 시점에 드러내는 것과 같은 톤으로, "유효한 위임 대상 없음" 불변식을 이 패키지
+// 안에서 소유한다. 목록을 직접 주입하는 저수준 New 는 테스트/특수 조립용으로 유지한다.
+func NewVerifier(client *http.Client, v *viper.Viper) (*Verifier, error) {
+	verifier := New(client, LoadAllowedEndpoints(v))
+	if verifier.AllowedEndpointCount() == 0 {
+		return nil, fmt.Errorf("설정 %s 에 유효한 https STS 엔드포인트가 하나도 없음", keyAllowedEndpoints)
+	}
+	return verifier, nil
+}
+
 // AllowedEndpointCount 는 정규화를 통과해 실제로 허용되는 STS 엔드포인트 수를 돌려준다.
-// 조립 루트가 이 값으로 "유효한 위임 대상이 하나도 없는" 오설정을 부팅 시점에 가른다. 원시
-// 입력 개수(LoadAllowedEndpoints 결과)와 달리, https 아님/파싱 불가로 버려진 항목은 세지
-// 않으므로 런타임 거부 동작과 일치한다.
+// NewVerifier 가 이 값으로 "유효한 위임 대상이 하나도 없는" 오설정을 부팅 시점에 가르고,
+// 조립 루트는 로그에도 쓴다. 원시 입력 개수(LoadAllowedEndpoints 결과)와 달리, https 아님/
+// 파싱 불가로 버려진 항목은 세지 않으므로 런타임 거부 동작과 일치한다.
 func (v *Verifier) AllowedEndpointCount() int {
 	return len(v.allowed)
 }
