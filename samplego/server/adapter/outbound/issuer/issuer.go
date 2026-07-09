@@ -27,8 +27,10 @@ import (
 // 헤더는 항상 같으므로 리터럴을 직접 인코딩해, 맵 마샬링의 필드 순서 비결정성을 피한다.
 var headerSegment = base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 
-// claims 는 발급 JWT 의 페이로드다. 구조체 필드 선언 순서가 곧 JSON 직렬화 순서이므로,
-// 같은 입력이면 항상 같은 바이트가 나온다(결정적 서명).
+// claims 는 발급 JWT 의 페이로드다(JWT 와이어 표현). 구조체 필드 선언 순서가 곧 JSON 직렬화
+// 순서이므로, 같은 입력이면 항상 같은 바이트가 나온다(결정적 서명). 발급(IssueCredential)과
+// 검증(Inspect)이 이 한 정의를 공유한다. 클레임을 추가/변경하면 대칭 지점 domain.VerifiedToken
+// 과 inbound.verifyResponse 도 함께 갱신한다(domain.VerifiedToken doc 참고).
 type claims struct {
 	Iss     string `json:"iss"`
 	Sub     string `json:"sub"`     // Identity.ARN. 허용 목록 대조 대상이자 안정적 주체 식별자.
@@ -109,10 +111,16 @@ func encodeSegment(v any) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// sign 은 서명 입력(header.payload)에 시크릿으로 HMAC-SHA256 서명을 계산해 base64url(no pad)
-// 로 돌려준다.
+// sign 은 서명 입력(header.payload)에 자신의 시크릿으로 HMAC-SHA256 서명을 계산한다.
 func (i *Issuer) sign(signingInput string) string {
-	m := hmac.New(sha256.New, i.secret)
+	return signWith(i.secret, signingInput)
+}
+
+// signWith 는 시크릿으로 서명 입력(header.payload)에 HMAC-SHA256 서명을 계산해 base64url
+// (no pad)로 돌려준다. 발급(Issuer)과 검증(Inspector)이 같은 서명 계산을 공유하도록, 시크릿을
+// 인자로 받는 패키지 함수로 둔다.
+func signWith(secret []byte, signingInput string) string {
+	m := hmac.New(sha256.New, secret)
 	m.Write([]byte(signingInput))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }

@@ -18,6 +18,15 @@ const (
 
 	// ReasonARNNotAllowed 는 STS 가 돌려준 ARN 이 허용 신원 목록에 없을 때다(7단계, 반환 신원 검증).
 	ReasonARNNotAllowed RejectionReason = "arn_not_allowed"
+
+	// ReasonTokenExpired 는 검증 대상 토큰의 exp 가 현재 시각을 지났을 때다(/verify 만료 검사).
+	ReasonTokenExpired RejectionReason = "token_expired"
+
+	// ReasonIssuerMismatch 는 토큰의 iss 클레임이 이 서버의 발급자 기대값과 다를 때다(/verify).
+	ReasonIssuerMismatch RejectionReason = "issuer_mismatch"
+
+	// ReasonAudienceMismatch 는 토큰의 aud 클레임이 이 서버의 대상 기대값과 다를 때다(/verify).
+	ReasonAudienceMismatch RejectionReason = "audience_mismatch"
 )
 
 // RejectionError 는 코어의 로컬 검증이 요청을 거부했음을 나타내는 에러다. Reason 으로

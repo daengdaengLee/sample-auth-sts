@@ -47,9 +47,10 @@ func (f *fakeAuthenticator) Authenticate(_ context.Context, in domain.Authentica
 	return f.out, f.err
 }
 
-// newAuthEngine 은 대역 포트를 주입한 라우터를 만든다. 로그는 버린다.
+// newAuthEngine 은 대역 포트를 주입한 라우터를 만든다. 로그는 버린다. /auth 테스트는 검증
+// 포트를 쓰지 않지만 NewRouter 가 두 포트를 모두 요구하므로, 미사용 verify 는 대역으로 채운다.
 func newAuthEngine(auth domain.Authenticator) *gin.Engine {
-	return NewRouter(logging.New(io.Discard, slog.LevelInfo), auth)
+	return NewRouter(logging.New(io.Discard, slog.LevelInfo), auth, &fakeTokenVerifier{})
 }
 
 // doAuth 는 주어진 JSON 본문으로 /auth 를 호출한 결과를 돌려준다.
@@ -179,12 +180,12 @@ func TestAuthenticate_invalidJSON(t *testing.T) {
 	}
 }
 
-// TestAuthenticate_bodyTooLarge 는 본문이 상한(maxAuthBodyBytes)을 넘으면 413 이고 코어를
+// TestAuthenticate_bodyTooLarge 는 본문이 상한(maxBodyBytes)을 넘으면 413 이고 코어를
 // 호출하지 않는지 확인한다(DoS 가드). MaxBytesReader 초과 -> *http.MaxBytesError -> 413.
 func TestAuthenticate_bodyTooLarge(t *testing.T) {
 	fake := &fakeAuthenticator{}
-	// maxAuthBodyBytes 를 확실히 넘기도록 body 필드에 큰 문자열을 채운 유효 JSON 을 만든다.
-	huge := `{"method":"POST","body":"` + strings.Repeat("A", maxAuthBodyBytes) + `"}`
+	// maxBodyBytes 를 확실히 넘기도록 body 필드에 큰 문자열을 채운 유효 JSON 을 만든다.
+	huge := `{"method":"POST","body":"` + strings.Repeat("A", maxBodyBytes) + `"}`
 
 	rec := doAuth(newAuthEngine(fake), []byte(huge))
 
