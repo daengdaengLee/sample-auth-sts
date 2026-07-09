@@ -1,7 +1,7 @@
 // Command server 는 저장소 README 에서 설명하는 샘플 신뢰 당사자(relying party)
-// 서버다. 조립 루트(buildAuthenticator)에서 공유 설정과 네 개의 아웃바운드 어댑터,
-// 도메인 서비스를 조립해 인바운드 라우터에 주입하고, graceful 셧다운을 갖춘 HTTP
-// 서버로 서빙한다.
+// 서버다. 조립 루트(buildServices)에서 공유 설정과 다섯 개의 아웃바운드 어댑터
+// (정책/시계/STS/발급/토큰 검사), 두 도메인 서비스를 조립해 두 인바운드 포트(/auth,
+// /verify)를 인바운드 라우터에 주입하고, graceful 셧다운을 갖춘 HTTP 서버로 서빙한다.
 package main
 
 import (
@@ -141,9 +141,10 @@ func buildServices(logger *slog.Logger) (domain.Authenticator, domain.TokenVerif
 	iss := issuer.New(issuerParams)
 
 	// /verify 배선: 발급과 같은 시크릿으로 서명을 재검증하는 검사기와, 발급 설정의 iss/aud
-	// 기대값으로 만료/발급자/대상을 판단하는 검증 서비스를 조립한다.
+	// 기대값을 노출하는 검증 정책으로 만료/발급자/대상을 판단하는 검증 서비스를 조립한다.
 	inspector := issuer.NewInspector(issuerParams)
-	tokenVerifier := domain.NewVerifyService(clk, inspector, issuerParams.Issuer, issuerParams.Audience)
+	verifyPolicy := issuer.NewVerifyPolicy(issuerParams)
+	tokenVerifier := domain.NewVerifyService(clk, inspector, verifyPolicy)
 
 	logger.Info("composition root assembled",
 		slog.Int("sts_endpoint_count", verifier.AllowedEndpointCount()),

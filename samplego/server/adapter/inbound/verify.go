@@ -1,7 +1,6 @@
 package inbound
 
 import (
-	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -17,8 +16,10 @@ type verifyRequest struct {
 	Token string `json:"token"`
 }
 
-// verifyResponse 는 검증 성공 시 토큰 클레임을 담는 응답 본문이다. 시각 클레임(exp/iat)은
-// authResponse 와 같은 관례로 RFC3339 문자열로 싣는다.
+// verifyResponse 는 검증 성공 시 토큰 클레임을 담는 응답 본문이다(HTTP 와이어 표현). 시각
+// 클레임(exp/iat)은 authResponse 와 같은 관례로 RFC3339 문자열로 싣는다. 클레임을 추가/변경
+// 하면 대칭 지점 issuer.claims 와 domain.VerifiedToken 도 함께 갱신한다(domain.VerifiedToken
+// doc 참고).
 type verifyResponse struct {
 	Issuer    string `json:"iss"`
 	Subject   string `json:"sub"`
@@ -36,21 +37,8 @@ type verifyResponse struct {
 func (h *Handler) Verify(c *gin.Context) {
 	ctx := c.Request.Context()
 
-	// 본문 크기를 제한해 거대한 본문으로 인한 메모리 고갈(DoS)을 막는다. 토큰은 작으므로
-	// /auth 와 같은 상한(maxAuthBodyBytes)이면 충분하다. 초과는 ShouldBindJSON 이
-	// *http.MaxBytesError 로 돌려주므로 413 으로, 그 외 파싱 실패는 400 으로 가른다.
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAuthBodyBytes)
-
 	var req verifyRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			h.logger.InfoContext(ctx, "verify 요청 본문이 상한 초과", slog.Int64("limit", tooLarge.Limit))
-			writeError(c, http.StatusRequestEntityTooLarge, "body_too_large", "요청 본문이 허용 크기를 초과함")
-			return
-		}
-		h.logger.InfoContext(ctx, "verify 요청 본문 파싱 실패", slog.Any("error", err))
-		writeError(c, http.StatusBadRequest, "invalid_body", "요청 본문 JSON 파싱 실패")
+	if !h.bindJSONBody(c, &req) {
 		return
 	}
 

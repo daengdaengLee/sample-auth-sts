@@ -77,3 +77,21 @@ func (i *Inspector) Inspect(_ context.Context, token string) (domain.VerifiedTok
 
 // 컴파일 타임에 Inspector 가 아웃바운드 포트를 만족하는지 확인한다.
 var _ domain.TokenInspector = (*Inspector)(nil)
+
+// verifyPolicy 는 발급 설정(jwt 섹션)의 iss/aud 기대값을 코어에 노출하는 VerifyPolicy
+// 구현이다. 발급 설정을 쥔 이 패키지에 두어, 발급과 검증이 같은 iss/aud 소스를 쓰게 한다.
+type verifyPolicy struct {
+	issuer   string
+	audience string
+}
+
+// NewVerifyPolicy 는 로드/검증된 Params 의 Issuer/Audience 로 VerifyPolicy 를 만든다.
+func NewVerifyPolicy(p Params) domain.VerifyPolicy {
+	return verifyPolicy{issuer: p.Issuer, audience: p.Audience}
+}
+
+func (p verifyPolicy) ExpectedIssuer() string   { return p.issuer }
+func (p verifyPolicy) ExpectedAudience() string { return p.audience }
+
+// 컴파일 타임에 verifyPolicy 가 아웃바운드 포트를 만족하는지 확인한다.
+var _ domain.VerifyPolicy = verifyPolicy{}

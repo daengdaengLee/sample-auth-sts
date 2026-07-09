@@ -31,10 +31,10 @@ const (
 	// amzDateFormat 은 X-Amz-Date 의 ISO8601 basic 형식이다(예: 20260708T120000Z).
 	amzDateFormat = "20060102T150405Z"
 
-	// maxAuthBodyBytes 는 /auth 요청 본문의 최대 바이트다. 서명된 GetCallerIdentity 엔벨로프는
-	// 작으므로(수 KB) 넉넉히 1 MiB 로 두고, 이를 넘으면 413 으로 거부한다. 상한이 없으면 거대한
+	// maxBodyBytes 는 수신 어댑터가 받는 JSON 요청 본문의 최대 바이트다(/auth 서명 엔벨로프,
+	// /verify 토큰 모두 작으므로 넉넉히 1 MiB). 넘으면 413 으로 거부한다. 상한이 없으면 거대한
 	// 본문으로 메모리를 고갈시키는 값싼 DoS 가 가능하다(STS 응답 상한 maxResponseBytes 와 같은 톤).
-	maxAuthBodyBytes = 1 << 20
+	maxBodyBytes = 1 << 20
 )
 
 // authRequest 는 /auth 요청 본문(JSON 엔벨로프)이다. 클라이언트가 SigV4 로 서명한 원본
@@ -65,20 +65,8 @@ type errorResponse struct {
 func (h *Handler) Authenticate(c *gin.Context) {
 	ctx := c.Request.Context()
 
-	// 본문 크기를 제한해 거대한 엔벨로프로 인한 메모리 고갈(DoS)을 막는다. 상한 초과는
-	// ShouldBindJSON 이 *http.MaxBytesError 로 돌려주므로 413 으로, 그 외 파싱 실패는 400 으로 가른다.
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAuthBodyBytes)
-
 	var req authRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			h.logger.InfoContext(ctx, "auth 요청 본문이 상한 초과", slog.Int64("limit", tooLarge.Limit))
-			writeError(c, http.StatusRequestEntityTooLarge, "body_too_large", "요청 본문이 허용 크기를 초과함")
-			return
-		}
-		h.logger.InfoContext(ctx, "auth 요청 본문 파싱 실패", slog.Any("error", err))
-		writeError(c, http.StatusBadRequest, "invalid_body", "요청 본문 JSON 파싱 실패")
+	if !h.bindJSONBody(c, &req) {
 		return
 	}
 
@@ -213,6 +201,29 @@ func rejectionStatus(reason domain.RejectionReason) int {
 // writeError 는 실패 응답을 JSON 으로 쓴다.
 func writeError(c *gin.Context, status int, reason, message string) {
 	c.JSON(status, errorResponse{Error: reason, Message: message})
+}
+
+// bindJSONBody 는 요청 본문을 maxBodyBytes 로 제한한 뒤 JSON 으로 dst 에 바인딩한다. 상한
+// 초과(*http.MaxBytesError)는 413, 그 외 파싱 실패는 400 으로 응답하고 false 를 돌려준다
+// (호출부는 즉시 return). 성공 시 true. /auth 와 /verify 가 공유하는 본문 파싱 관례라, 상한/
+// 상태 매핑을 한 곳에 둔다. 로그는 경로 중립 문구를 쓴다(접근 로그에 이미 path 가 있음).
+func (h *Handler) bindJSONBody(c *gin.Context, dst any) bool {
+	ctx := c.Request.Context()
+
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
+
+	if err := c.ShouldBindJSON(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			h.logger.InfoContext(ctx, "요청 본문이 상한 초과", slog.Int64("limit", tooLarge.Limit))
+			writeError(c, http.StatusRequestEntityTooLarge, "body_too_large", "요청 본문이 허용 크기를 초과함")
+			return false
+		}
+		h.logger.InfoContext(ctx, "요청 본문 JSON 파싱 실패", slog.Any("error", err))
+		writeError(c, http.StatusBadRequest, "invalid_body", "요청 본문 JSON 파싱 실패")
+		return false
+	}
+	return true
 }
 
 // headerValues 는 헤더 맵에서 name 과 대소문자 무시로 일치하는 모든 키의 값을 하나로 모아

@@ -37,9 +37,9 @@ func (f *fakeTokenVerifier) VerifyToken(_ context.Context, in domain.VerifyToken
 }
 
 // newVerifyEngine 은 대역 검증 포트를 주입한 라우터를 만든다. /verify 테스트는 인증 포트를
-// 쓰지 않으므로 auth 는 nil 로 둔다. 로그는 버린다.
+// 쓰지 않지만 NewRouter 가 두 포트를 모두 요구하므로, 미사용 auth 는 대역으로 채운다. 로그는 버린다.
 func newVerifyEngine(verify domain.TokenVerifier) *gin.Engine {
-	return NewRouter(logging.New(io.Discard, slog.LevelInfo), nil, verify)
+	return NewRouter(logging.New(io.Discard, slog.LevelInfo), &fakeAuthenticator{}, verify)
 }
 
 // doVerify 는 주어진 JSON 본문으로 /verify 를 호출한 결과를 돌려준다.
@@ -160,7 +160,7 @@ func TestVerify_badRequest(t *testing.T) {
 
 	t.Run("본문 상한 초과는 413", func(t *testing.T) {
 		fake := &fakeTokenVerifier{}
-		huge := `{"token":"` + strings.Repeat("A", maxAuthBodyBytes) + `"}`
+		huge := `{"token":"` + strings.Repeat("A", maxBodyBytes) + `"}`
 		rec := doVerify(newVerifyEngine(fake), []byte(huge))
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Errorf("status = %d, want 413 (body=%s)", rec.Code, rec.Body.String())
@@ -202,7 +202,7 @@ jwt:
 
 	t.Run("유효 토큰은 200", func(t *testing.T) {
 		// 발급 시각 직후의 고정 시계를 써, ttl(15m) 안이라 만료되지 않는다.
-		svc := domain.NewVerifyService(fixedClock{t: beforeIssue}, inspector, params.Issuer, params.Audience)
+		svc := domain.NewVerifyService(fixedClock{t: beforeIssue}, inspector, issuer.NewVerifyPolicy(params))
 		rec := doVerify(newVerifyEngine(svc), mustJSON(t, verifyRequest{Token: cred.Token}))
 
 		if rec.Code != http.StatusOK {
@@ -221,7 +221,7 @@ jwt:
 	})
 
 	t.Run("위조 서명은 401", func(t *testing.T) {
-		svc := domain.NewVerifyService(fixedClock{t: beforeIssue}, inspector, params.Issuer, params.Audience)
+		svc := domain.NewVerifyService(fixedClock{t: beforeIssue}, inspector, issuer.NewVerifyPolicy(params))
 		parts := strings.Split(cred.Token, ".")
 		// 서명 세그먼트의 첫 글자를 바꿔 위조한다.
 		sig := []byte(parts[2])
@@ -240,7 +240,7 @@ jwt:
 
 	t.Run("만료 토큰은 401", func(t *testing.T) {
 		// 발급 시각보다 20분 뒤의 고정 시계로 검증하면 ttl(15m)을 지나 만료다.
-		svc := domain.NewVerifyService(fixedClock{t: beforeIssue.Add(20 * time.Minute)}, inspector, params.Issuer, params.Audience)
+		svc := domain.NewVerifyService(fixedClock{t: beforeIssue.Add(20 * time.Minute)}, inspector, issuer.NewVerifyPolicy(params))
 		rec := doVerify(newVerifyEngine(svc), mustJSON(t, verifyRequest{Token: cred.Token}))
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("status = %d, want 401 (body=%s)", rec.Code, rec.Body.String())
@@ -249,7 +249,9 @@ jwt:
 
 	t.Run("클레임 불일치는 401", func(t *testing.T) {
 		// 대상(aud) 기대값을 다르게 주입하면 aud 불일치로 거부된다.
-		svc := domain.NewVerifyService(fixedClock{t: beforeIssue}, inspector, params.Issuer, "https://other.example/clients")
+		mismatchParams := params
+		mismatchParams.Audience = "https://other.example/clients"
+		svc := domain.NewVerifyService(fixedClock{t: beforeIssue}, inspector, issuer.NewVerifyPolicy(mismatchParams))
 		rec := doVerify(newVerifyEngine(svc), mustJSON(t, verifyRequest{Token: cred.Token}))
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("status = %d, want 401 (body=%s)", rec.Code, rec.Body.String())

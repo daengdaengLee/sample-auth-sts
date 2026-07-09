@@ -27,8 +27,10 @@ import (
 // 헤더는 항상 같으므로 리터럴을 직접 인코딩해, 맵 마샬링의 필드 순서 비결정성을 피한다.
 var headerSegment = base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 
-// claims 는 발급 JWT 의 페이로드다. 구조체 필드 선언 순서가 곧 JSON 직렬화 순서이므로,
-// 같은 입력이면 항상 같은 바이트가 나온다(결정적 서명).
+// claims 는 발급 JWT 의 페이로드다(JWT 와이어 표현). 구조체 필드 선언 순서가 곧 JSON 직렬화
+// 순서이므로, 같은 입력이면 항상 같은 바이트가 나온다(결정적 서명). 발급(IssueCredential)과
+// 검증(Inspect)이 이 한 정의를 공유한다. 클레임을 추가/변경하면 대칭 지점 domain.VerifiedToken
+// 과 inbound.verifyResponse 도 함께 갱신한다(domain.VerifiedToken doc 참고).
 type claims struct {
 	Iss     string `json:"iss"`
 	Sub     string `json:"sub"`     // Identity.ARN. 허용 목록 대조 대상이자 안정적 주체 식별자.

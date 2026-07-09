@@ -22,6 +22,15 @@ func (f *fakeInspector) Inspect(_ context.Context, token string) (VerifiedToken,
 	return f.vt, f.err
 }
 
+// fakeVerifyPolicy 는 VerifyPolicy 포트의 테스트 대역으로, 고정 iss/aud 기대값을 돌려준다.
+type fakeVerifyPolicy struct {
+	issuer   string
+	audience string
+}
+
+func (p fakeVerifyPolicy) ExpectedIssuer() string   { return p.issuer }
+func (p fakeVerifyPolicy) ExpectedAudience() string { return p.audience }
+
 // verifyBaseTime 은 만료 판단을 결정적으로 만들기 위한 기준 시각이다.
 var verifyBaseTime = time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 
@@ -42,7 +51,8 @@ func validVerifiedToken() VerifiedToken {
 
 // newVerifyService 는 고정 시계와 기준 기대값(iss/aud)으로 검증 서비스를 만든다.
 func newVerifyService(inspector TokenInspector) *VerifyService {
-	return NewVerifyService(fakeClock{now: verifyBaseTime}, inspector, "https://server.example", "https://server.example/clients")
+	policy := fakeVerifyPolicy{issuer: "https://server.example", audience: "https://server.example/clients"}
+	return NewVerifyService(fakeClock{now: verifyBaseTime}, inspector, policy)
 }
 
 // TestVerifyToken_success 는 서명(검사기)이 통과하고 만료/발급자/대상이 모두 맞으면 클레임이

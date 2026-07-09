@@ -25,6 +25,11 @@ type CredentialIssuer interface {
 // VerifiedToken 은 서명 검증을 통과한 토큰에서 뽑아낸 클레임이다. 코어는 이 값으로 만료
 // (ExpiresAt)와 발급자(Issuer)/대상(Audience)을 판단한다. 시각 클레임은 초 단위 Unix 시각을
 // time.Time 으로 되살린 값이다(발급이 초 단위로 자르는 것과 대칭).
+//
+// 클레임 표현은 계층별로 셋이 대칭을 이룬다(하나를 추가/변경하면 나머지도 함께 갱신):
+// issuer.claims(JWT 와이어, int64 unix) <-> 이 VerifiedToken(도메인, time.Time) <->
+// inbound.verifyResponse(HTTP 응답, RFC3339). 계약이 서로 달라 통합하지 않고 매핑으로 잇는다
+// (issuer.Inspect 와 inbound.Handler.Verify 가 매핑 지점).
 type VerifiedToken struct {
 	Issuer    string
 	Subject   string
@@ -47,6 +52,18 @@ type VerifiedToken struct {
 // 전파하므로, 수신 어댑터가 이 도메인 타입만으로 무효(401) 대 인프라(5xx)를 가른다.
 type TokenInspector interface {
 	Inspect(ctx context.Context, token string) (VerifiedToken, error)
+}
+
+// VerifyPolicy 는 토큰 검증(/verify)에 코어가 쓰는 기대값을 제공하는 아웃바운드 포트다.
+// 발급 설정(jwt 섹션)에서 온 iss/aud 기대값을 노출한다. /auth 의 Policy 와 짝을 이루되,
+// 그쪽은 정책(policy 섹션) 값이고 이쪽은 발급 설정 값이라 별도 포트로 둔다(인터페이스 분리).
+// 코어가 실제로 대조에 쓰는 값만 노출한다.
+type VerifyPolicy interface {
+	// ExpectedIssuer 는 이 서버가 발급한 토큰이 담아야 하는 iss 기대값이다.
+	ExpectedIssuer() string
+
+	// ExpectedAudience 는 이 서버가 발급한 토큰이 담아야 하는 aud 기대값이다.
+	ExpectedAudience() string
 }
 
 // Clock 은 신선도 판단에 쓸 현재 시각을 제공하는 아웃바운드 포트다(4단계). 테스트에서

@@ -9,20 +9,17 @@ type VerifyService struct {
 	clock     Clock
 	inspector TokenInspector
 
-	// expectedIssuer/expectedAudience 는 이 서버가 발급한 토큰이 담아야 하는 iss/aud
-	// 기대값이다. 발급 설정(jwt 섹션)에서 온 값이라 조립 지점에서 주입한다. Policy 는 /auth
-	// 신뢰 판단용이라 여기 끼우지 않고, 검증 전용 값으로 서비스에 직접 둔다.
-	expectedIssuer   string
-	expectedAudience string
+	// policy 는 iss/aud 기대값을 주는 검증 정책 포트다. Service(/auth)가 판단값을 Policy
+	// 포트로 읽는 것과 대칭으로, 검증 기대값도 포트 뒤에 둔다(테스트 대역 주입 용이).
+	policy VerifyPolicy
 }
 
-// NewVerifyService 는 시계/검사기와 iss/aud 기대값을 주입해 VerifyService 를 만든다.
-func NewVerifyService(clock Clock, inspector TokenInspector, expectedIssuer, expectedAudience string) *VerifyService {
+// NewVerifyService 는 시계/검사기와 검증 정책 포트를 주입해 VerifyService 를 만든다.
+func NewVerifyService(clock Clock, inspector TokenInspector, policy VerifyPolicy) *VerifyService {
 	return &VerifyService{
-		clock:            clock,
-		inspector:        inspector,
-		expectedIssuer:   expectedIssuer,
-		expectedAudience: expectedAudience,
+		clock:     clock,
+		inspector: inspector,
+		policy:    policy,
 	}
 }
 
@@ -45,10 +42,10 @@ func (s *VerifyService) VerifyToken(ctx context.Context, in VerifyTokenInput) (V
 
 	// 발급자/대상 검사: 이 서버가 발급한 토큰인지(iss)와 이 서버의 대상으로 발급됐는지(aud)를
 	// 확인해, 다른 발급자/대상의 토큰을 받아들이지 않는다.
-	if vt.Issuer != s.expectedIssuer {
+	if vt.Issuer != s.policy.ExpectedIssuer() {
 		return VerifyTokenOutput{}, reject(ReasonIssuerMismatch, "토큰 iss 클레임이 발급자 기대값과 일치하지 않음")
 	}
-	if vt.Audience != s.expectedAudience {
+	if vt.Audience != s.policy.ExpectedAudience() {
 		return VerifyTokenOutput{}, reject(ReasonAudienceMismatch, "토큰 aud 클레임이 대상 기대값과 일치하지 않음")
 	}
 
