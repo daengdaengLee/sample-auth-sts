@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/daengdaenglee/sample-auth-sts/samplego/client/internal/proof"
@@ -61,12 +62,14 @@ type Client struct {
 }
 
 // New 는 대상 서버 주소와 http.Client 로 Client 를 만든다. httpClient 가 nil 이면 기본
-// http.Client 를 쓴다.
+// http.Client 를 쓴다(타임아웃 없음이라 실행 경로는 타임아웃을 실은 클라이언트를 주입한다).
+// serverAddr 의 후행 슬래시는 제거한다: 뒤에 "/auth" 를 붙일 때 "//auth" 가 되면 gin 이
+// 리다이렉트/404 로 떨구므로, 호출부 입력과 무관하게 여기서 한 번 정규화한다.
 func New(serverAddr string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
-	return &Client{serverAddr: serverAddr, httpClient: httpClient}
+	return &Client{serverAddr: strings.TrimRight(serverAddr, "/"), httpClient: httpClient}
 }
 
 // PostAuth 는 서명된 엔벨로프를 /auth 로 보내 발급 토큰을 받는다. 200 이면 토큰/만료를,

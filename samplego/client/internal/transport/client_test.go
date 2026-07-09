@@ -52,6 +52,26 @@ func TestPostAuth_success(t *testing.T) {
 	}
 }
 
+// TestNew_trimsTrailingSlash 는 serverAddr 후행 슬래시가 제거되어, 경로가 "//auth" 가 아니라
+// "/auth" 로 도달하는지 확인한다(gin 리다이렉트/404 회피).
+func TestNew_trimsTrailingSlash(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = io.WriteString(w, `{"token":"t","expires_at":"2026-07-09T12:15:00Z"}`)
+	}))
+	defer srv.Close()
+
+	// 후행 슬래시를 붙인 주소로 클라이언트를 만든다.
+	_, err := New(srv.URL+"/", nil).PostAuth(context.Background(), proof.Envelope{})
+	if err != nil {
+		t.Fatalf("PostAuth 실패: %v", err)
+	}
+	if gotPath != "/auth" {
+		t.Errorf("도달 경로 = %q, want /auth (후행 슬래시 미정규화 시 //auth)", gotPath)
+	}
+}
+
 // TestPostAuth_apiError 는 4xx 응답이 error/message/status 를 담은 *APIError 로 매핑되는지
 // 확인한다.
 func TestPostAuth_apiError(t *testing.T) {

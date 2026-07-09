@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -64,8 +65,9 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	// 5단계. 전송: 서명된 요청만 서버 /auth 로 보내 발급 자격을 받는다.
-	client := transport.New(cfg.ServerAddr, nil)
+	// 5단계. 전송: 서명된 요청만 서버 /auth 로 보내 발급 자격을 받는다. 무응답 서버/STS 지연에
+	// 매달리지 않도록 타임아웃을 실은 http.Client 를 주입한다.
+	client := transport.New(cfg.ServerAddr, &http.Client{Timeout: cfg.Timeout})
 	authResult, err := client.PostAuth(ctx, env)
 	if err != nil {
 		return err
@@ -81,14 +83,20 @@ func run(ctx context.Context) error {
 			return err
 		}
 		fmt.Println("검증 성공:")
-		fmt.Println("  iss:", claims.Issuer)
-		fmt.Println("  sub:", claims.Subject)
-		fmt.Println("  aud:", claims.Audience)
-		fmt.Println("  exp:", claims.ExpiresAt)
-		fmt.Println("  iat:", claims.IssuedAt)
-		fmt.Println("  jti:", claims.JTI)
-		fmt.Println("  account:", claims.Account)
-		fmt.Println("  user_id:", claims.UserID)
+		// 라벨과 클레임 필드를 한 목록으로 묶어 순회한다. 클레임이 늘어도 라벨-필드 짝을
+		// 한 곳에서만 맞추면 된다.
+		for _, kv := range []struct{ label, value string }{
+			{"iss", claims.Issuer},
+			{"sub", claims.Subject},
+			{"aud", claims.Audience},
+			{"exp", claims.ExpiresAt},
+			{"iat", claims.IssuedAt},
+			{"jti", claims.JTI},
+			{"account", claims.Account},
+			{"user_id", claims.UserID},
+		} {
+			fmt.Printf("  %s: %s\n", kv.label, kv.value)
+		}
 	}
 
 	return nil

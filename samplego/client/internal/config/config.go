@@ -8,7 +8,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"strconv"
+	"time"
 )
 
 const (
@@ -45,6 +48,11 @@ type Config struct {
 	// Verify 는 발급받은 토큰을 /verify 로 왕복 확인할지 여부다(데모 편의).
 	Verify bool
 
+	// Timeout 은 서버로의 /auth, /verify 요청 한 건의 최대 소요 시간이다. 무응답 서버나 STS
+	// 지연에 요청이 무한정 매달리지 않도록 http.Client 에 걸 값이다(서버 STS 어댑터가 자기
+	// http.Client 에 타임아웃을 거는 것과 같은 톤).
+	Timeout time.Duration
+
 	// StaticCreds 가 참이면 SDK 자격증명 체인 대신 아래 static 값으로 서명한다. 실 AWS
 	// 자격증명 없이 목 STS 로 로컬 데모/오프라인 구동을 돌릴 때 쓴다.
 	StaticCreds        bool
@@ -52,10 +60,6 @@ type Config struct {
 	StaticSecretKey    string
 	StaticSessionToken string
 }
-
-// UsesPresigned 는 설정된 증명 형태가 pre-signed URL 인지 알려준다. 호출부가 후속 미지원을
-// 안내하는 데 쓴다.
-func (c Config) UsesPresigned() bool { return c.Form == formPresigned }
 
 // Load 는 프로세스 인자와 환경변수에서 설정을 읽어 검증한다. os.Args[1:] 와 os.Getenv 를 쓰는
 // 실행용 진입점이며, 테스트는 parse 로 인자/환경 조회를 주입한다.
@@ -77,6 +81,7 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 	region := fs.String("region", envOr(getenv, "AWS_REGION", "us-east-1"), "SigV4 서명 리전")
 	form := fs.String("form", envOr(getenv, "CLIENT_PROOF_FORM", formHeader), "증명 형태(header 만 지원, presigned 는 후속)")
 	verify := fs.Bool("verify", envBool(getenv, "CLIENT_VERIFY"), "발급 토큰을 /verify 로 왕복 확인")
+	timeoutRaw := fs.String("timeout", envOr(getenv, "CLIENT_TIMEOUT", "30s"), "서버 요청 한 건의 최대 소요 시간(time.ParseDuration 형식)")
 
 	staticCreds := fs.Bool("static-creds", envBool(getenv, "CLIENT_STATIC_CREDS"), "SDK 체인 대신 static 자격증명으로 서명(목 STS 데모용)")
 	staticAccessKeyID := fs.String("static-access-key-id", envOr(getenv, "CLIENT_STATIC_ACCESS_KEY_ID", ""), "static 자격증명 액세스 키 ID")
@@ -87,6 +92,13 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 		return Config{}, err
 	}
 
+	// 타임아웃은 서버 어댑터의 duration 파싱과 같은 톤으로 time.ParseDuration 으로 해석하고,
+	// 형식 오류는 로드 시점에 드러낸다(양수 검증은 validate 가 맡는다).
+	timeout, err := time.ParseDuration(*timeoutRaw)
+	if err != nil {
+		return Config{}, fmt.Errorf("timeout 파싱 실패(%q): %w", *timeoutRaw, err)
+	}
+
 	cfg := Config{
 		ServerAddr:         *serverAddr,
 		BindingValue:       *bindingValue,
@@ -94,6 +106,7 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 		Region:             *region,
 		Form:               *form,
 		Verify:             *verify,
+		Timeout:            timeout,
 		StaticCreds:        *staticCreds,
 		StaticAccessKeyID:  *staticAccessKeyID,
 		StaticSecretKey:    *staticSecretKey,
@@ -115,8 +128,15 @@ func (c Config) validate() error {
 	if c.BindingValue == "" {
 		return fmt.Errorf("binding-value 가 비어 있음(서버 policy.binding_value 와 일치해야 함)")
 	}
-	if c.STSEndpoint == "" {
-		return fmt.Errorf("sts-endpoint 가 비어 있음")
+	// STS 엔드포인트는 비어 있지 않을 뿐 아니라 https 여야 한다. 서버 STS 어댑터의
+	// normalizeEndpoint 가 비-https 를 거부하므로(평문 다운그레이드 차단), http 값을 로컬에서
+	// 통과시키면 서버가 불투명한 401 로 떨구게 된다. 여기서 명확한 로컬 에러로 미리 거른다.
+	stsURL, err := url.Parse(c.STSEndpoint)
+	if err != nil {
+		return fmt.Errorf("sts-endpoint 파싱 실패(%q): %w", c.STSEndpoint, err)
+	}
+	if stsURL.Scheme != "https" || stsURL.Host == "" {
+		return fmt.Errorf("sts-endpoint 는 https URL 이어야 함(현재 %q): 서버가 비-https 위임 대상을 거부한다", c.STSEndpoint)
 	}
 	if c.Region == "" {
 		return fmt.Errorf("region 이 비어 있음")
@@ -128,6 +148,9 @@ func (c Config) validate() error {
 		return fmt.Errorf("form=presigned 는 아직 미지원(후속): 현재 서버는 헤더 기반만 받는다")
 	default:
 		return fmt.Errorf("form 값이 올바르지 않음(%q): header 만 지원", c.Form)
+	}
+	if c.Timeout <= 0 {
+		return fmt.Errorf("timeout 은 양수여야 함(현재 %v): 0 이하면 요청 경계가 없어진다", c.Timeout)
 	}
 	if c.StaticCreds && (c.StaticAccessKeyID == "" || c.StaticSecretKey == "") {
 		return fmt.Errorf("static-creds 사용 시 static-access-key-id 와 static-secret-key 가 필요함")
@@ -144,13 +167,13 @@ func envOr(getenv func(string) string, key, fallback string) string {
 	return fallback
 }
 
-// envBool 은 불리언 환경변수를 해석한다. "1"/"true"(대소문자 무시)만 참으로 보고 나머지는
-// 거짓으로 둔다. 플래그가 명시되면 그 값이 우선한다.
+// envBool 은 불리언 환경변수를 해석한다. strconv.ParseBool 이 받아들이는 값("1","t","T",
+// "TRUE","true","True" 등)을 참으로 본다. 미설정/빈 값/해석 불가는 거짓으로 둔다. 플래그가
+// 명시되면 그 값이 우선한다.
 func envBool(getenv func(string) string, key string) bool {
-	switch v := getenv(key); v {
-	case "1", "true", "TRUE", "True":
-		return true
-	default:
+	b, err := strconv.ParseBool(getenv(key))
+	if err != nil {
 		return false
 	}
+	return b
 }

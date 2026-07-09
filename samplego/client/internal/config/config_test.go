@@ -3,6 +3,7 @@ package config
 import (
 	"io"
 	"testing"
+	"time"
 )
 
 // noEnv 는 어떤 환경변수도 설정되지 않은 상태를 흉내낸다(항상 빈 문자열).
@@ -38,6 +39,41 @@ func TestParse_defaults(t *testing.T) {
 	}
 	if cfg.Verify {
 		t.Error("Verify 가 기본 true 임, want false")
+	}
+	if cfg.Timeout != 30*time.Second {
+		t.Errorf("Timeout = %v, want 30s", cfg.Timeout)
+	}
+}
+
+// TestParse_timeout 은 --timeout 이 파싱되고, 형식 오류/0 이하가 거부되는지 확인한다.
+func TestParse_timeout(t *testing.T) {
+	cfg, err := parse("client", []string{"--timeout", "5s"}, noEnv, io.Discard)
+	if err != nil {
+		t.Fatalf("parse 실패: %v", err)
+	}
+	if cfg.Timeout != 5*time.Second {
+		t.Errorf("Timeout = %v, want 5s", cfg.Timeout)
+	}
+
+	if _, err := parse("client", []string{"--timeout", "not-a-duration"}, noEnv, io.Discard); err == nil {
+		t.Error("잘못된 timeout 인데 에러가 없음")
+	}
+	if _, err := parse("client", []string{"--timeout", "0s"}, noEnv, io.Discard); err == nil {
+		t.Error("0 timeout 인데 에러가 없음")
+	}
+	if _, err := parse("client", []string{"--timeout", "-1s"}, noEnv, io.Discard); err == nil {
+		t.Error("음수 timeout 인데 에러가 없음")
+	}
+}
+
+// TestParse_rejectsNonHTTPSEndpoint 는 sts-endpoint 가 https 가 아니거나 host 가 없으면
+// 거부되는지 확인한다(서버가 비-https 위임 대상을 거부하므로 로컬에서 먼저 거른다).
+func TestParse_rejectsNonHTTPSEndpoint(t *testing.T) {
+	cases := []string{"http://sts.amazonaws.com", "ftp://sts.amazonaws.com", "https://", "not-a-url::"}
+	for _, ep := range cases {
+		if _, err := parse("client", []string{"--sts-endpoint", ep}, noEnv, io.Discard); err == nil {
+			t.Errorf("sts-endpoint=%q 인데 통과함", ep)
+		}
 	}
 }
 
