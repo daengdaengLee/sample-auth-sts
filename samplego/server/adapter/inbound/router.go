@@ -18,9 +18,11 @@ import (
 // 사용한다. auth/verify 는 조립 지점에서 주입하는 인바운드 포트로, /auth 핸들러는
 // 파싱한 서명 요청을 auth 로, /verify 핸들러는 파싱한 토큰을 verify 로 넘긴다.
 func NewRouter(logger *slog.Logger, auth domain.Authenticator, verify domain.TokenVerifier) *gin.Engine {
-	// 두 인바운드 포트는 필수다. nil 이면 해당 라우트가 요청 시점에 nil 역참조로 패닉해
-	// gin.Recovery 가 500 으로 가리므로, 배선 오류를 조립 시점에 즉시 드러낸다(config Load
-	// 게이트와 같은 fail-fast 톤). 요청 경로가 아니라 startup 에서만 발생한다.
+	// 두 인바운드 포트는 필수다(생성자 nil 가드 불변식). nil 은 오설정이 아니라 프로그래머
+	// 배선 버그이며, 그대로 두면 해당 라우트가 요청 시점에 nil 역참조로 패닉해 gin.Recovery
+	// 가 500 으로 가린다. 그래서 조립 시점에 즉시 패닉으로 드러낸다(주입 의존성 불변 위반은
+	// 패닉이 idiomatic; 오설정을 에러로 돌려주는 config Load/NewVerifier 와는 다른 부류다).
+	// 요청 경로가 아니라 startup 에서만 발생한다.
 	if auth == nil {
 		panic("inbound.NewRouter: auth(Authenticator) 가 nil 임")
 	}
