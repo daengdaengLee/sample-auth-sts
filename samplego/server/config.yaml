@@ -8,17 +8,17 @@
 # 키의 점을 밑줄로 바꾼 이름을 쓴다(예: jwt.signing_secret -> JWT_SIGNING_SECRET).
 
 jwt:
-  # signing_secret 은 HS256 대칭키다. 서명과 (향후) 검증에 같은 키를 쓴다. 약한 키는 서명
+  # signing_secret 은 HS256 대칭키다. 서명과 검증에 같은 키를 쓴다. 약한 키는 서명
   # 위조 위험이 있어 최소 32바이트(256비트)를 요구한다(issuer 어댑터가 부팅 때 강제).
   signing_secret: "sample-only-hs256-secret-change-me-in-real-deployments"
 
   # ttl 은 발급 토큰의 유효 기간이다. time.ParseDuration 형식("15m", "1h" 등). exp = iat + ttl.
   ttl: "15m"
 
-  # issuer 는 발급자 식별자다(JWT iss 클레임). 향후 /verify 가 발급자 검증에 쓴다.
+  # issuer 는 발급자 식별자다(JWT iss 클레임). /verify 가 발급자 검증에 쓴다.
   issuer: "https://server.example"
 
-  # audience 는 발급 토큰의 대상 식별자다(JWT aud 클레임). 향후 /verify 가 대상 검증에 쓴다.
+  # audience 는 발급 토큰의 대상 식별자다(JWT aud 클레임). /verify 가 대상 검증에 쓴다.
   audience: "https://server.example/clients"
 
 # policy 섹션은 정책 어댑터(도메인 Policy 포트)가 읽는다. 코어가 신뢰 판단에 쓰는 값이다.

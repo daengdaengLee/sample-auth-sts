@@ -5,8 +5,8 @@
 //
 // 외부 JWT 라이브러리 없이 표준 라이브러리(crypto/hmac + crypto/sha256 + encoding/json +
 // encoding/base64)로 직접 서명한다. 도메인 doc.go 의 표준 라이브러리 전용 원칙, STS 어댑터가
-// AWS SDK 없이 구현한 관례와 맞춘다. HS256 은 대칭키라, 향후 /verify 엔드포인트가 같은
-// 시크릿으로 서명을 재계산해 검증할 수 있도록 표준 JWT 형태(3 세그먼트, base64url no pad,
+// AWS SDK 없이 구현한 관례와 맞춘다. HS256 은 대칭키라, /verify(issuer.Inspector)가 같은
+// 시크릿으로 서명을 재계산해 검증하도록 표준 JWT 형태(3 세그먼트, base64url no pad,
 // HS256)로 맞춰 발급한다.
 package issuer
 
