@@ -1,7 +1,8 @@
 // Package inbound 은 README 의 헥사고날 설계에서 "수신 어댑터(inbound adapter)"에
 // 해당한다. HTTP 전송 계층을 담당해 요청을 받아 도메인 코어의 유스케이스로
-// 넘기는 입구이며, 신뢰 판단 로직은 담지 않는다. 현재는 라우팅 골격만 두고
-// 핸들러는 스텁 상태다.
+// 넘기는 입구이며, 신뢰 판단 로직은 담지 않는다. /healthz, /auth, /verify 핸들러가
+// 구현/테스트돼 있고, /auth 는 파싱한 서명 요청을, /verify 는 파싱한 토큰을 각각
+// 인바운드 포트로 넘긴다.
 package inbound
 
 import (
