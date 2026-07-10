@@ -161,6 +161,37 @@ func TestParse_regionEndpointDerivation(t *testing.T) {
 			t.Error("cn 리전 + 기본 global 인데 통과함(엔드포인트 명시 요구여야 함)")
 		}
 	})
+
+	// 플래그가 ambient env 를 이긴다: AWS_REGION(env)와 다른 리전형 엔드포인트를 플래그로 주면,
+	// ambient 리전을 무시하고 엔드포인트에서 리전을 파생해 통과한다.
+	t.Run("--sts-endpoint 플래그가 ambient AWS_REGION 을 이김", func(t *testing.T) {
+		cfg, err := parse("client",
+			[]string{"--sts-endpoint", "https://sts.eu-west-1.amazonaws.com"},
+			envMap(map[string]string{"AWS_REGION": "us-east-1"}), io.Discard)
+		if err != nil {
+			t.Fatalf("parse 실패: %v", err)
+		}
+		if cfg.Region != "eu-west-1" {
+			t.Errorf("Region = %q, want eu-west-1(플래그 엔드포인트에서 파생)", cfg.Region)
+		}
+	})
+}
+
+// TestParse_rejectsMalformedRegion 은 리전답지 않은 문자열이 로컬 형식 에러로 거부되고, 정상
+// 리전 형태(표준/gov)는 통과하는지 확인한다.
+func TestParse_rejectsMalformedRegion(t *testing.T) {
+	bad := []string{"garbage", "eu_west_1", "EU-WEST-1", "eu-west", "", "us east 1"}
+	for _, r := range bad {
+		if _, err := parse("client", []string{"--region", r}, noEnv, io.Discard); err == nil {
+			t.Errorf("region=%q 인데 통과함(형식 에러 기대)", r)
+		}
+	}
+	good := []string{"us-east-1", "eu-west-1", "ap-northeast-2", "us-gov-west-1"}
+	for _, r := range good {
+		if _, err := parse("client", []string{"--region", r}, noEnv, io.Discard); err != nil {
+			t.Errorf("region=%q 인데 거부됨: %v", r, err)
+		}
+	}
 }
 
 // TestParse_flagOverridesEnv 는 명시된 플래그가 환경변수보다 우선하는지 확인한다.

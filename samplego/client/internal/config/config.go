@@ -10,10 +10,16 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// awsRegionRe 는 AWS 리전 식별자의 형식이다. 표준(us-east-1), gov(us-gov-west-1),
+// cn(cn-north-1) 형태를 모두 포용한다. 리전 유효성 자체(실재 여부)는 형식만으로 판별할 수
+// 없으므로(그럴듯한 오타는 형식상 정상), 이 검사는 리전답지 않은 문자열만 거른다.
+var awsRegionRe = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d+$`)
 
 const (
 	// formHeader 는 헤더 기반 서명(X-Amz-Date 기준, 예: Vault)을 가리키는 증명 형태 값이다.
@@ -102,28 +108,44 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 
 	// region 과 sts-endpoint 는 반드시 일치해야 하는데 기본값이 독립 소스(AWS_REGION 대 global)라
 	// 기본끼리 충돌할 수 있다. 한쪽만 명시됐으면 다른 쪽을 그로부터 파생해 충돌을 없앤다. 둘 다
-	// 명시됐으면 그대로 두고 validate 가 정합성을 검사한다. 명시 여부는 플래그 설정(fs.Visit)과
-	// 대응 환경변수 존재로 판정한다.
+	// 명시됐으면 그대로 두고 validate 가 정합성을 검사한다.
+	//
+	// 명시에는 플래그(fs.Visit)와 대응 환경변수 두 소스가 있는데, 플래그는 이번 실행의 명시
+	// 의도이고 환경변수(AWS_REGION 등)는 ambient 라, 파생 판단에서 플래그가 env 를 이긴다. 즉
+	// 엔드포인트를 플래그로 준 경우엔 ambient AWS_REGION 을 무시하고 리전을 엔드포인트에서 파생한다.
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	regionExplicit := set["region"] || getenv("AWS_REGION") != ""
-	endpointExplicit := set["sts-endpoint"] || getenv("STS_ENDPOINT") != ""
+	regionFlag := set["region"]
+	endpointFlag := set["sts-endpoint"]
+	regionExplicit := regionFlag || getenv("AWS_REGION") != ""
+	endpointExplicit := endpointFlag || getenv("STS_ENDPOINT") != ""
 
 	regionVal, endpointVal := *region, *stsEndpoint
-	switch {
-	case endpointExplicit && !regionExplicit:
-		// 엔드포인트만 명시: 표준 STS 호스트면 리전을 그로부터 파생한다.
+	deriveRegionFromEndpoint := func() {
+		// 표준 STS 호스트면 리전을 엔드포인트에서 파생한다(그 외면 그대로 두고 validate 가 검사).
 		if u, perr := url.Parse(endpointVal); perr == nil {
 			if r, ok := regionForSTSHost(u.Hostname()); ok {
 				regionVal = r
 			}
 		}
-	case regionExplicit && !endpointExplicit:
-		// 리전만 명시(AWS_REGION 포함): 표준 파티션이면 엔드포인트를 그로부터 파생한다. 파생할 수
-		// 없으면(cn 등) 기본 global 을 유지해, validate 가 불일치를 명확히 안내하게 한다.
+	}
+	deriveEndpointFromRegion := func() {
+		// 표준 파티션이면 엔드포인트를 리전에서 파생한다. 파생할 수 없으면(cn 등) 기본 global 을
+		// 유지해, validate 가 불일치를 명확히 안내하게 한다.
 		if ep, ok := endpointForRegion(regionVal); ok {
 			endpointVal = ep
 		}
+	}
+	switch {
+	case endpointFlag && !regionFlag:
+		// 엔드포인트를 플래그로 명시: ambient AWS_REGION 을 무시하고 리전을 그로부터 파생한다.
+		deriveRegionFromEndpoint()
+	case regionExplicit && !endpointExplicit:
+		// 리전만 명시(AWS_REGION env 포함): 엔드포인트를 그로부터 파생한다.
+		deriveEndpointFromRegion()
+	case endpointExplicit && !regionExplicit:
+		// 엔드포인트만 명시(STS_ENDPOINT env 포함): 리전을 그로부터 파생한다.
+		deriveRegionFromEndpoint()
 	}
 
 	cfg := Config{
@@ -167,6 +189,12 @@ func (c Config) validate() error {
 	}
 	if c.Region == "" {
 		return fmt.Errorf("region 이 비어 있음")
+	}
+	// 리전 형식 검사: 리전답지 않은 문자열(garbage, eu_west_1 등)을 로컬에서 명확히 거른다.
+	// 형식상 정상인 오타(eu-wast-1 등)는 여기서 못 거르며(형식만으로 실재 여부는 판별 불가),
+	// 서버의 STS 허용 목록/검증으로 넘어간다.
+	if !awsRegionRe.MatchString(c.Region) {
+		return fmt.Errorf("region 형식이 올바르지 않음(%q): AWS 리전 형식이어야 함(예: us-east-1)", c.Region)
 	}
 	// 표준 STS 호스트에서 리전을 파생할 수 있으면 서명 리전과 대조한다. 한쪽만 기본에서 바꾼
 	// 절반-수정(예: 리전형 엔드포인트 + 기본 us-east-1)은 실 STS 가 서명을 거절해 불투명한 401
@@ -220,6 +248,10 @@ func envBool(getenv func(string) string, key string) bool {
 //   - sts[.-fips].<region>.amazonaws.com (표준/gov): <region>.
 //   - sts[.-fips].<region>.amazonaws.com.cn (중국): <region>.
 //   - sts.<region>.api.aws (dualstack): <region>.
+//
+// 표준 파티션 패턴만 유지하는 손수 목록이라, 미열거 형태(예: FIPS dualstack, 신규 파티션
+// 접미사)는 known=false 로 스킵돼 정합성 검사를 못 받는다. 그런 대상은 --sts-endpoint 와
+// --region 을 함께 명시해야 한다(AWS SDK 엔드포인트 리졸버 채택은 수동 SigV4 라 범위 밖).
 func regionForSTSHost(host string) (string, bool) {
 	host = strings.ToLower(host)
 	if host == "sts.amazonaws.com" {
