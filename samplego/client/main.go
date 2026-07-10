@@ -39,6 +39,12 @@ func run(ctx context.Context) error {
 		return err
 	}
 
+	// 실행 전체(자격증명 획득 + 서버 요청)를 하나의 데드라인으로 묶는다. 이 ctx 가 이후 모든
+	// 단계로 전파되므로, HTTP 다리뿐 아니라 자격증명 획득(SDK 체인의 SSO/AssumeRole/IMDS 호출)
+	// 도 무한정 매달리지 않는다.
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+
 	// 2단계. 자격증명 획득: 표준 AWS SDK 자격증명 체인에서 자격증명을 얻는다. 데모/오프라인용
 	// static 자격증명을 쓰면 실 AWS 없이 목 STS 로 경로를 구동할 수 있다. 시크릿 키는 로컬에
 	// 두고 서명에만 쓰인다.
@@ -65,8 +71,8 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	// 5단계. 전송: 서명된 요청만 서버 /auth 로 보내 발급 자격을 받는다. 무응답 서버/STS 지연에
-	// 매달리지 않도록 타임아웃을 실은 http.Client 를 주입한다.
+	// 5단계. 전송: 서명된 요청만 서버 /auth 로 보내 발급 자격을 받는다. 위 ctx 데드라인이 전체를
+	// 덮지만, 요청별 안전망으로 http.Client 에도 같은 타임아웃을 걸어 둔다.
 	client := transport.New(cfg.ServerAddr, &http.Client{Timeout: cfg.Timeout})
 	authResult, err := client.PostAuth(ctx, env)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -48,9 +49,9 @@ type Config struct {
 	// Verify 는 발급받은 토큰을 /verify 로 왕복 확인할지 여부다(데모 편의).
 	Verify bool
 
-	// Timeout 은 서버로의 /auth, /verify 요청 한 건의 최대 소요 시간이다. 무응답 서버나 STS
-	// 지연에 요청이 무한정 매달리지 않도록 http.Client 에 걸 값이다(서버 STS 어댑터가 자기
-	// http.Client 에 타임아웃을 거는 것과 같은 톤).
+	// Timeout 은 실행 전체(자격증명 획득 + 서버 /auth, /verify 요청)의 최대 소요 시간이다.
+	// 무응답 서버/STS 지연이나 느린 자격증명 획득에 무한정 매달리지 않도록, 실행 파이프라인을
+	// 감싸는 컨텍스트 데드라인이자 요청별 http.Client 타임아웃으로 쓴다.
 	Timeout time.Duration
 
 	// StaticCreds 가 참이면 SDK 자격증명 체인 대신 아래 static 값으로 서명한다. 실 AWS
@@ -81,7 +82,7 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 	region := fs.String("region", envOr(getenv, "AWS_REGION", "us-east-1"), "SigV4 서명 리전")
 	form := fs.String("form", envOr(getenv, "CLIENT_PROOF_FORM", formHeader), "증명 형태(header 만 지원, presigned 는 후속)")
 	verify := fs.Bool("verify", envBool(getenv, "CLIENT_VERIFY"), "발급 토큰을 /verify 로 왕복 확인")
-	timeoutRaw := fs.String("timeout", envOr(getenv, "CLIENT_TIMEOUT", "30s"), "서버 요청 한 건의 최대 소요 시간(time.ParseDuration 형식)")
+	timeoutRaw := fs.String("timeout", envOr(getenv, "CLIENT_TIMEOUT", "30s"), "실행 전체(자격증명 획득 + 서버 요청)의 최대 소요 시간(time.ParseDuration 형식)")
 
 	staticCreds := fs.Bool("static-creds", envBool(getenv, "CLIENT_STATIC_CREDS"), "SDK 체인 대신 static 자격증명으로 서명(목 STS 데모용)")
 	staticAccessKeyID := fs.String("static-access-key-id", envOr(getenv, "CLIENT_STATIC_ACCESS_KEY_ID", ""), "static 자격증명 액세스 키 ID")
@@ -141,6 +142,13 @@ func (c Config) validate() error {
 	if c.Region == "" {
 		return fmt.Errorf("region 이 비어 있음")
 	}
+	// 표준 STS 호스트에서 리전을 파생할 수 있으면 서명 리전과 대조한다. 한쪽만 기본에서 바꾼
+	// 절반-수정(예: 리전형 엔드포인트 + 기본 us-east-1)은 실 STS 가 서명을 거절해 불투명한 401
+	// 로 이어지므로, 여기서 명확한 로컬 에러로 미리 거른다. 표준 호스트가 아니면(커스텀/사설/타
+	// 파티션) 파생을 못 하므로 검사를 건너뛴다(과잉 거부 방지).
+	if r, ok := regionForSTSHost(stsURL.Hostname()); ok && r != c.Region {
+		return fmt.Errorf("region(%q) 과 sts-endpoint 리전(%q)이 불일치: 서명 리전과 엔드포인트가 맞아야 STS 가 서명을 검증한다", c.Region, r)
+	}
 	switch c.Form {
 	case formHeader:
 		// 현재 서버가 지원하는 유일한 형태다.
@@ -176,4 +184,22 @@ func envBool(getenv func(string) string, key string) bool {
 		return false
 	}
 	return b
+}
+
+// regionForSTSHost 는 표준 AWS STS 호스트에서 SigV4 서명 리전을 파생한다. 판정 가능한 표준
+// 형태만 다루고(known=true), 커스텀/사설/타 파티션(cn/gov/api.aws 등) 호스트는 known=false 로
+// 돌려 정합성 검사를 건너뛰게 한다(과잉 거부 방지). 표준 형태:
+//   - sts.amazonaws.com (global): us-east-1 로 서명해야 유효하다.
+//   - sts.<region>.amazonaws.com, sts-fips.<region>.amazonaws.com: <region>.
+func regionForSTSHost(host string) (string, bool) {
+	host = strings.ToLower(host)
+	if host == "sts.amazonaws.com" {
+		return "us-east-1", true
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) == 4 && (parts[0] == "sts" || parts[0] == "sts-fips") &&
+		parts[2] == "amazonaws" && parts[3] == "com" {
+		return parts[1], true
+	}
+	return "", false
 }

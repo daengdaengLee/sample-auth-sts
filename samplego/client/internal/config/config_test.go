@@ -77,6 +77,35 @@ func TestParse_rejectsNonHTTPSEndpoint(t *testing.T) {
 	}
 }
 
+// TestParse_regionEndpointConsistency 는 표준 STS 호스트에서 파생한 리전과 서명 리전의
+// 정합성 검사를 확인한다: 일치/커스텀 호스트는 통과, 불일치는 거부.
+func TestParse_regionEndpointConsistency(t *testing.T) {
+	cases := []struct {
+		name     string
+		endpoint string
+		region   string
+		wantErr  bool
+	}{
+		{"global + us-east-1(기본)", "https://sts.amazonaws.com", "us-east-1", false},
+		{"global + eu-west-1(불일치)", "https://sts.amazonaws.com", "eu-west-1", true},
+		{"리전형 + 일치", "https://sts.eu-west-1.amazonaws.com", "eu-west-1", false},
+		{"리전형 + 불일치", "https://sts.eu-west-1.amazonaws.com", "us-east-1", true},
+		{"fips 리전형 + 일치", "https://sts-fips.us-east-1.amazonaws.com", "us-east-1", false},
+		{"커스텀 호스트는 스킵", "https://sts.internal.example", "us-east-1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parse("client", []string{"--sts-endpoint", tc.endpoint, "--region", tc.region}, noEnv, io.Discard)
+			if tc.wantErr && err == nil {
+				t.Errorf("endpoint=%q region=%q: 에러 기대했으나 통과함", tc.endpoint, tc.region)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("endpoint=%q region=%q: 통과 기대했으나 에러: %v", tc.endpoint, tc.region, err)
+			}
+		})
+	}
+}
+
 // TestParse_flagOverridesEnv 는 명시된 플래그가 환경변수보다 우선하는지 확인한다.
 func TestParse_flagOverridesEnv(t *testing.T) {
 	env := envMap(map[string]string{"SERVER_ADDR": "http://from-env:9000"})
