@@ -162,8 +162,8 @@ func TestParse_regionEndpointDerivation(t *testing.T) {
 		}
 	})
 
-	// 플래그가 ambient env 를 이긴다: AWS_REGION(env)와 다른 리전형 엔드포인트를 플래그로 주면,
-	// ambient 리전을 무시하고 엔드포인트에서 리전을 파생해 통과한다.
+	// 플래그가 ambient env 를 이긴다(엔드포인트 축): AWS_REGION(env)와 다른 리전형 엔드포인트를
+	// 플래그로 주면, ambient 리전을 무시하고 엔드포인트에서 리전을 파생해 통과한다.
 	t.Run("--sts-endpoint 플래그가 ambient AWS_REGION 을 이김", func(t *testing.T) {
 		cfg, err := parse("client",
 			[]string{"--sts-endpoint", "https://sts.eu-west-1.amazonaws.com"},
@@ -173,6 +173,20 @@ func TestParse_regionEndpointDerivation(t *testing.T) {
 		}
 		if cfg.Region != "eu-west-1" {
 			t.Errorf("Region = %q, want eu-west-1(플래그 엔드포인트에서 파생)", cfg.Region)
+		}
+	})
+
+	// 플래그가 ambient env 를 이긴다(리전 축, 대칭): STS_ENDPOINT(env)가 global 이어도 리전을
+	// 플래그로 주면, ambient 엔드포인트를 무시하고 리전에서 엔드포인트를 파생해 통과한다.
+	t.Run("--region 플래그가 ambient STS_ENDPOINT 를 이김", func(t *testing.T) {
+		cfg, err := parse("client",
+			[]string{"--region", "eu-west-1"},
+			envMap(map[string]string{"STS_ENDPOINT": "https://sts.amazonaws.com"}), io.Discard)
+		if err != nil {
+			t.Fatalf("parse 실패: %v", err)
+		}
+		if cfg.STSEndpoint != "https://sts.eu-west-1.amazonaws.com" {
+			t.Errorf("STSEndpoint = %q, want 리전 플래그에서 파생", cfg.STSEndpoint)
 		}
 	})
 }

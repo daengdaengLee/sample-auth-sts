@@ -107,18 +107,29 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 	}
 
 	// region 과 sts-endpoint 는 반드시 일치해야 하는데 기본값이 독립 소스(AWS_REGION 대 global)라
-	// 기본끼리 충돌할 수 있다. 한쪽만 명시됐으면 다른 쪽을 그로부터 파생해 충돌을 없앤다. 둘 다
-	// 명시됐으면 그대로 두고 validate 가 정합성을 검사한다.
+	// 기본끼리 충돌할 수 있다. 두 손잡이의 "명시 강도"를 비교해, 더 강하게 명시된 쪽에서 약한
+	// 쪽을 파생해 충돌을 없앤다. 강도가 같으면(둘 다 플래그/둘 다 env/둘 다 기본) 그대로 두고
+	// validate 가 정합성을 검사한다.
 	//
-	// 명시에는 플래그(fs.Visit)와 대응 환경변수 두 소스가 있는데, 플래그는 이번 실행의 명시
-	// 의도이고 환경변수(AWS_REGION 등)는 ambient 라, 파생 판단에서 플래그가 env 를 이긴다. 즉
-	// 엔드포인트를 플래그로 준 경우엔 ambient AWS_REGION 을 무시하고 리전을 엔드포인트에서 파생한다.
+	// 강도: 0=기본, 1=환경변수(ambient), 2=플래그(이번 실행의 명시 의도). 플래그가 env 를, env 가
+	// 기본을 이긴다. 두 축을 대칭으로 다루므로, 엔드포인트 플래그가 ambient AWS_REGION 을 이기는
+	// 것과 리전 플래그가 ambient STS_ENDPOINT 를 이기는 것이 똑같이 성립한다.
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	regionFlag := set["region"]
-	endpointFlag := set["sts-endpoint"]
-	regionExplicit := regionFlag || getenv("AWS_REGION") != ""
-	endpointExplicit := endpointFlag || getenv("STS_ENDPOINT") != ""
+	regionStrength := 0
+	if getenv("AWS_REGION") != "" {
+		regionStrength = 1
+	}
+	if set["region"] {
+		regionStrength = 2
+	}
+	endpointStrength := 0
+	if getenv("STS_ENDPOINT") != "" {
+		endpointStrength = 1
+	}
+	if set["sts-endpoint"] {
+		endpointStrength = 2
+	}
 
 	regionVal, endpointVal := *region, *stsEndpoint
 	deriveRegionFromEndpoint := func() {
@@ -137,14 +148,11 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 		}
 	}
 	switch {
-	case endpointFlag && !regionFlag:
-		// 엔드포인트를 플래그로 명시: ambient AWS_REGION 을 무시하고 리전을 그로부터 파생한다.
-		deriveRegionFromEndpoint()
-	case regionExplicit && !endpointExplicit:
-		// 리전만 명시(AWS_REGION env 포함): 엔드포인트를 그로부터 파생한다.
+	case regionStrength > endpointStrength:
+		// 리전이 더 강하게 명시됨: 엔드포인트를 리전에서 파생한다.
 		deriveEndpointFromRegion()
-	case endpointExplicit && !regionExplicit:
-		// 엔드포인트만 명시(STS_ENDPOINT env 포함): 리전을 그로부터 파생한다.
+	case endpointStrength > regionStrength:
+		// 엔드포인트가 더 강하게 명시됨: 리전을 엔드포인트에서 파생한다.
 		deriveRegionFromEndpoint()
 	}
 
