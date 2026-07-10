@@ -116,20 +116,18 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 	// 것과 리전 플래그가 ambient STS_ENDPOINT 를 이기는 것이 똑같이 성립한다.
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	regionStrength := 0
-	if getenv("AWS_REGION") != "" {
-		regionStrength = 1
+	strengthOf := func(flagName, envKey string) int {
+		s := 0
+		if getenv(envKey) != "" {
+			s = 1
+		}
+		if set[flagName] {
+			s = 2
+		}
+		return s
 	}
-	if set["region"] {
-		regionStrength = 2
-	}
-	endpointStrength := 0
-	if getenv("STS_ENDPOINT") != "" {
-		endpointStrength = 1
-	}
-	if set["sts-endpoint"] {
-		endpointStrength = 2
-	}
+	regionStrength := strengthOf("region", "AWS_REGION")
+	endpointStrength := strengthOf("sts-endpoint", "STS_ENDPOINT")
 
 	regionVal, endpointVal := *region, *stsEndpoint
 	deriveRegionFromEndpoint := func() {
