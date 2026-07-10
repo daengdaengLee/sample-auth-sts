@@ -91,6 +91,10 @@ func TestParse_regionEndpointConsistency(t *testing.T) {
 		{"리전형 + 일치", "https://sts.eu-west-1.amazonaws.com", "eu-west-1", false},
 		{"리전형 + 불일치", "https://sts.eu-west-1.amazonaws.com", "us-east-1", true},
 		{"fips 리전형 + 일치", "https://sts-fips.us-east-1.amazonaws.com", "us-east-1", false},
+		{"cn 리전형 + 일치", "https://sts.cn-north-1.amazonaws.com.cn", "cn-north-1", false},
+		{"cn 리전형 + 불일치", "https://sts.cn-north-1.amazonaws.com.cn", "us-east-1", true},
+		{"dualstack + 일치", "https://sts.eu-west-1.api.aws", "eu-west-1", false},
+		{"dualstack + 불일치", "https://sts.eu-west-1.api.aws", "us-east-1", true},
 		{"커스텀 호스트는 스킵", "https://sts.internal.example", "us-east-1", false},
 	}
 	for _, tc := range cases {
@@ -104,6 +108,59 @@ func TestParse_regionEndpointConsistency(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParse_regionEndpointDerivation 은 한쪽만 명시됐을 때 다른 쪽을 파생해 기본 충돌을
+// 없애는지 확인한다(양쪽 기본이 독립 소스라 생기던 하드 거부 제거).
+func TestParse_regionEndpointDerivation(t *testing.T) {
+	t.Run("AWS_REGION 만(env) -> 엔드포인트 파생", func(t *testing.T) {
+		cfg, err := parse("client", nil, envMap(map[string]string{"AWS_REGION": "eu-west-1"}), io.Discard)
+		if err != nil {
+			t.Fatalf("parse 실패: %v", err)
+		}
+		if cfg.Region != "eu-west-1" {
+			t.Errorf("Region = %q, want eu-west-1", cfg.Region)
+		}
+		if cfg.STSEndpoint != "https://sts.eu-west-1.amazonaws.com" {
+			t.Errorf("STSEndpoint = %q, want 파생된 리전형", cfg.STSEndpoint)
+		}
+	})
+
+	t.Run("--region 만 -> 엔드포인트 파생", func(t *testing.T) {
+		cfg, err := parse("client", []string{"--region", "ap-northeast-2"}, noEnv, io.Discard)
+		if err != nil {
+			t.Fatalf("parse 실패: %v", err)
+		}
+		if cfg.STSEndpoint != "https://sts.ap-northeast-2.amazonaws.com" {
+			t.Errorf("STSEndpoint = %q", cfg.STSEndpoint)
+		}
+	})
+
+	t.Run("--region us-east-1 만 -> global 유지", func(t *testing.T) {
+		cfg, err := parse("client", []string{"--region", "us-east-1"}, noEnv, io.Discard)
+		if err != nil {
+			t.Fatalf("parse 실패: %v", err)
+		}
+		if cfg.STSEndpoint != "https://sts.amazonaws.com" {
+			t.Errorf("STSEndpoint = %q, want global", cfg.STSEndpoint)
+		}
+	})
+
+	t.Run("--sts-endpoint 리전형 만 -> 리전 파생", func(t *testing.T) {
+		cfg, err := parse("client", []string{"--sts-endpoint", "https://sts.eu-west-1.amazonaws.com"}, noEnv, io.Discard)
+		if err != nil {
+			t.Fatalf("parse 실패: %v", err)
+		}
+		if cfg.Region != "eu-west-1" {
+			t.Errorf("Region = %q, want eu-west-1(파생)", cfg.Region)
+		}
+	})
+
+	t.Run("cn 리전 만 -> 미파생, validate 불일치로 거부", func(t *testing.T) {
+		if _, err := parse("client", nil, envMap(map[string]string{"AWS_REGION": "cn-north-1"}), io.Discard); err == nil {
+			t.Error("cn 리전 + 기본 global 인데 통과함(엔드포인트 명시 요구여야 함)")
+		}
+	})
 }
 
 // TestParse_flagOverridesEnv 는 명시된 플래그가 환경변수보다 우선하는지 확인한다.

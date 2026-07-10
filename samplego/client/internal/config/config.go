@@ -100,11 +100,37 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 		return Config{}, fmt.Errorf("timeout 파싱 실패(%q): %w", *timeoutRaw, err)
 	}
 
+	// region 과 sts-endpoint 는 반드시 일치해야 하는데 기본값이 독립 소스(AWS_REGION 대 global)라
+	// 기본끼리 충돌할 수 있다. 한쪽만 명시됐으면 다른 쪽을 그로부터 파생해 충돌을 없앤다. 둘 다
+	// 명시됐으면 그대로 두고 validate 가 정합성을 검사한다. 명시 여부는 플래그 설정(fs.Visit)과
+	// 대응 환경변수 존재로 판정한다.
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	regionExplicit := set["region"] || getenv("AWS_REGION") != ""
+	endpointExplicit := set["sts-endpoint"] || getenv("STS_ENDPOINT") != ""
+
+	regionVal, endpointVal := *region, *stsEndpoint
+	switch {
+	case endpointExplicit && !regionExplicit:
+		// 엔드포인트만 명시: 표준 STS 호스트면 리전을 그로부터 파생한다.
+		if u, perr := url.Parse(endpointVal); perr == nil {
+			if r, ok := regionForSTSHost(u.Hostname()); ok {
+				regionVal = r
+			}
+		}
+	case regionExplicit && !endpointExplicit:
+		// 리전만 명시(AWS_REGION 포함): 표준 파티션이면 엔드포인트를 그로부터 파생한다. 파생할 수
+		// 없으면(cn 등) 기본 global 을 유지해, validate 가 불일치를 명확히 안내하게 한다.
+		if ep, ok := endpointForRegion(regionVal); ok {
+			endpointVal = ep
+		}
+	}
+
 	cfg := Config{
 		ServerAddr:         *serverAddr,
 		BindingValue:       *bindingValue,
-		STSEndpoint:        *stsEndpoint,
-		Region:             *region,
+		STSEndpoint:        endpointVal,
+		Region:             regionVal,
 		Form:               *form,
 		Verify:             *verify,
 		Timeout:            timeout,
@@ -187,19 +213,45 @@ func envBool(getenv func(string) string, key string) bool {
 }
 
 // regionForSTSHost 는 표준 AWS STS 호스트에서 SigV4 서명 리전을 파생한다. 판정 가능한 표준
-// 형태만 다루고(known=true), 커스텀/사설/타 파티션(cn/gov/api.aws 등) 호스트는 known=false 로
-// 돌려 정합성 검사를 건너뛰게 한다(과잉 거부 방지). 표준 형태:
+// 형태만 다루고(known=true), 그 외(커스텀/사설) 호스트는 known=false 로 돌려 정합성 검사를
+// 건너뛰게 한다(과잉 거부 방지). 파생이 아니라 인식/대조이므로 파티션을 넓게 다뤄도 위험이 없다.
+// 표준 형태:
 //   - sts.amazonaws.com (global): us-east-1 로 서명해야 유효하다.
-//   - sts.<region>.amazonaws.com, sts-fips.<region>.amazonaws.com: <region>.
+//   - sts[.-fips].<region>.amazonaws.com (표준/gov): <region>.
+//   - sts[.-fips].<region>.amazonaws.com.cn (중국): <region>.
+//   - sts.<region>.api.aws (dualstack): <region>.
 func regionForSTSHost(host string) (string, bool) {
 	host = strings.ToLower(host)
 	if host == "sts.amazonaws.com" {
 		return "us-east-1", true
 	}
 	parts := strings.Split(host, ".")
-	if len(parts) == 4 && (parts[0] == "sts" || parts[0] == "sts-fips") &&
-		parts[2] == "amazonaws" && parts[3] == "com" {
+	stsLabel := len(parts) > 0 && (parts[0] == "sts" || parts[0] == "sts-fips")
+	switch {
+	case len(parts) == 4 && stsLabel && parts[2] == "amazonaws" && parts[3] == "com":
+		// 표준/gov: sts.<region>.amazonaws.com
+		return parts[1], true
+	case len(parts) == 5 && stsLabel && parts[2] == "amazonaws" && parts[3] == "com" && parts[4] == "cn":
+		// 중국: sts.<region>.amazonaws.com.cn
+		return parts[1], true
+	case len(parts) == 4 && parts[0] == "sts" && parts[2] == "api" && parts[3] == "aws":
+		// dualstack: sts.<region>.api.aws
 		return parts[1], true
 	}
 	return "", false
+}
+
+// endpointForRegion 은 서명 리전에서 표준 STS 엔드포인트 URL 을 파생한다. 잘못된 호스트를
+// 만들지 않는 것이 원칙이라, 확실히 조립할 수 있는 표준/gov 파티션만 다루고(ok=true) 그 외
+// (중국 등 호스트 문법이 다른 파티션)는 ok=false 로 돌려 호출부가 명시를 요구하게 한다.
+//   - us-east-1: global sts.amazonaws.com (서버 기본 allowlist 와 정렬).
+//   - 그 외 표준/gov 리전: sts.<region>.amazonaws.com.
+func endpointForRegion(region string) (string, bool) {
+	if region == "us-east-1" {
+		return "https://sts.amazonaws.com", true
+	}
+	if strings.HasPrefix(region, "cn-") {
+		return "", false // 중국 파티션은 .amazonaws.com.cn 이라 파생하지 않는다(명시 필요).
+	}
+	return "https://sts." + region + ".amazonaws.com", true
 }
