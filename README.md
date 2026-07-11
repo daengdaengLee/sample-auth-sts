@@ -314,9 +314,10 @@ cd samplego/client && go run . --verify
 - `--binding-value`: 서명 범위에 넣을 서버 바인딩 헤더 값 (서버 `policy.binding_value`와 일치해야 함)
 - `--sts-endpoint`: SigV4 서명/위임 대상 STS 엔드포인트 (https, 기본 `https://sts.amazonaws.com`)
 - `--region`: SigV4 서명 리전 (기본 `us-east-1`)
+- `--form`: 증명 형태 (기본 `header`; 현재 `header` 만 지원, `presigned` 는 후속)
 - `--timeout`: 실행 전체(자격증명 획득 + 서버 요청)의 최대 소요 시간 (기본 `30s`)
 - `--verify`: 발급 토큰을 `/verify`로 왕복 확인 (데모 편의)
-- `--static-creds`, `--static-access-key-id`, `--static-secret-key`, `--static-session-token`: SDK 자격증명 체인 대신 static 값으로 서명 (실 AWS 없이 목 STS 를 구동하는 데모/오프라인용)
+- `--static-creds`, `--static-access-key-id`, `--static-secret-key`: SDK 자격증명 체인 대신 static 값으로 서명 (실 AWS 없이 목 STS 를 구동하는 데모/오프라인용). `--static-session-token` 은 임시 자격증명일 때만 선택.
 
 `--region`과 `--sts-endpoint`는 서로 일치해야 합니다. 표준 AWS 파티션이라면 한쪽만 명시해도 나머지를 자동으로 파생하므로 둘 중 하나만 줘도 됩니다. 둘 다 명시하거나 둘 다 기본값이면 그대로 두고 로컬 정합성만 검사하며, 불일치는 로드 시점에 거부합니다.
 
@@ -346,8 +347,8 @@ cd samplego/client && go test -tags e2e ./internal/e2e/...
 
 두 컴포넌트가 주고받는 HTTP 계약은 다음과 같습니다(참고용).
 
-- `POST /auth` 요청 본문: `{method, url, headers(map[string][]string), body(base64 표준 인코딩)}`. 성공은 `200`과 `{token, expires_at(RFC3339)}`, 실패는 `4xx`와 `{error, message}` 입니다.
-- `POST /verify` 요청 본문: `{token}`. 성공은 `200`과 발급 토큰의 클레임, 실패는 `401` 입니다.
+- `POST /auth` 요청 본문: `{method, url, headers(map[string][]string), body(base64 표준 인코딩)}`. 성공은 `200`과 `{token, expires_at(RFC3339)}`, 실패는 `4xx`(형식/신선도/바인딩/허용 신원 등) 또는 `5xx`(위임 upstream 오류 시 `502`)와 `{error, message}` 입니다.
+- `POST /verify` 요청 본문: `{token}`. 성공은 `200`과 발급 토큰의 클레임, 실패는 `4xx`(토큰 검증 실패 `401`, 형식 오류 `400`) 또는 `5xx`(내부 오류 `500`)입니다.
 
 ## 제한 사항
 
