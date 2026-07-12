@@ -348,7 +348,7 @@ cd samplego/client && go test -tags e2e ./internal/e2e/...
 두 컴포넌트가 주고받는 HTTP 계약은 다음과 같습니다(참고용).
 
 - `POST /auth` 요청 본문: `{method, url, headers(map[string][]string), body(base64 표준 인코딩)}`. 성공은 `200`과 `{token, expires_at(RFC3339)}`, 실패는 `4xx`(형식/신선도/바인딩/허용 신원 등) 또는 `5xx`(위임 upstream 오류 시 `502`)와 `{error, message}` 입니다.
-- `POST /verify` 요청 본문: `{token}`. 성공은 `200`과 발급 토큰의 클레임, 실패는 `4xx`(토큰 검증 실패 `401`, 형식 오류 `400`) 또는 `5xx`(내부 오류 `500`)입니다.
+- `POST /verify` 요청 본문: `{token}`. 성공은 `200`과 발급 토큰의 클레임, 실패는 `4xx`(토큰 검증 실패 `401`, 형식 오류 `400`, 본문 상한 초과 `413` 등) 또는 `5xx`(내부 오류 `500`)와 `{error, message}` 입니다.
 
 ## 제한 사항
 
