@@ -280,12 +280,92 @@ C4Component
 
 ### 실행 및 데모
 
-{TODO}
+이 절은 서버와 클라이언트를 실제로 실행하는 방법과, 실 AWS 없이 인증 왕복을 관통해 보는 방법을 정리합니다. 값의 의미는 `설정`을, 각 컴포넌트가 하는 일은 `서버`/`클라이언트`를 참고하세요.
+
+#### 서버 실행
+
+서버는 자신의 작업 디렉터리(cwd)에 있는 `config.yaml`을 읽어 설정을 로드합니다.
+
+```
+cd samplego/server && go run .
+```
+
+기본으로 `:8080`에서 요청을 받으며, `LISTEN_ADDR` 환경변수로 리슨 주소를 바꿀 수 있습니다. 커밋된 `config.yaml`의 주요 기본값은 다음과 같습니다.
+
+- `sts.endpoint_allowlist`: `https://sts.amazonaws.com` (위임을 허용할 STS 엔드포인트)
+- `policy.allowed_arns`: `arn:aws:iam::123456789012:role/workload` (반환 ARN 을 대조할 허용 신원 목록)
+- `policy.binding_value`: `https://server.example/audience` (이 서버만 받아들이는 바인딩 기대값)
+- `policy.request_max_age`: `5m` (받아들일 서명 요청의 최대 age)
+- `jwt.ttl`: `15m` (발급 토큰 유효 기간)
+
+설정 파일 값은 대응 환경변수로 덮어쓸 수 있습니다(키의 점을 밑줄로 바꾼 이름, 예: `policy.binding_value` -> `POLICY_BINDING_VALUE`). 커밋된 `jwt.signing_secret`은 데모 전용이므로 실 배포에서는 반드시 `JWT_SIGNING_SECRET` 등으로 교체하세요(`제한 사항` 참고).
+
+#### 클라이언트 실행
+
+클라이언트는 보유한 AWS 자격증명으로 `GetCallerIdentity` 요청에 서명해 서버 `/auth`로 보내고, 발급 토큰을 받은 뒤 `--verify`를 주면 `/verify`로 왕복 확인합니다.
+
+```
+cd samplego/client && go run . --verify
+```
+
+주요 플래그(대응 환경변수가 있으면 플래그가 우선):
+
+- `--server-addr`: 요청을 보낼 대상 서버 주소 (기본 `http://localhost:8080`)
+- `--binding-value`: 서명 범위에 넣을 서버 바인딩 헤더 값 (서버 `policy.binding_value`와 일치해야 함)
+- `--sts-endpoint`: SigV4 서명/위임 대상 STS 엔드포인트 (https, 기본 `https://sts.amazonaws.com`)
+- `--region`: SigV4 서명 리전 (기본 `us-east-1`)
+- `--form`: 증명 형태 (기본 `header`; 현재 `header` 만 지원, `presigned` 는 후속)
+- `--timeout`: 실행 전체(자격증명 획득 + 서버 요청)의 최대 소요 시간 (기본 `30s`)
+- `--verify`: 발급 토큰을 `/verify`로 왕복 확인 (데모 편의)
+- `--static-creds`, `--static-access-key-id`, `--static-secret-key`: SDK 자격증명 체인 대신 static 값으로 서명 (실 AWS 없이 목 STS 를 구동하는 데모/오프라인용). `--static-session-token` 은 임시 자격증명일 때만 선택.
+
+`--region`과 `--sts-endpoint`는 서로 일치해야 합니다. 표준 AWS 파티션이라면 한쪽만 명시해도 나머지를 자동으로 파생하므로 둘 중 하나만 줘도 됩니다. 둘 다 명시하거나 둘 다 기본값이면 그대로 두고 로컬 정합성만 검사하며, 불일치는 로드 시점에 거부합니다.
+
+#### 실 AWS 흐름
+
+실제 AWS 자격증명으로 구동할 때는 세 조건이 모두 맞아야 인증이 성공합니다.
+
+- 클라이언트가 유효한 AWS 자격증명을 보유해야 합니다(표준 SDK 자격증명 체인).
+- 서버가 실 STS 엔드포인트로 아웃바운드 HTTPS 를 낼 수 있어야 합니다(위임).
+- STS 가 돌려준 ARN 이 서버 `policy.allowed_arns` 목록에 있어야 합니다.
+
+클라이언트 `--region`과 `--sts-endpoint`는 일치해야 하며(한쪽만 주면 나머지를 파생), 커밋된 기본값은 global STS(`https://sts.amazonaws.com` + `us-east-1`)를 가리킵니다.
+
+#### 로컬 데모(실 AWS 없이)
+
+정직하게 밝히면, "서버 바이너리 대 클라이언트 바이너리 + 목 STS" 형태의 완전한 로컬 데모는 어렵습니다. 서버의 STS 신원 검증 어댑터는 위임 대상이 https 여야 하는데, 목 STS 를 띄우는 `httptest` TLS 서버의 자체 서명 인증서를 서버 바이너리가 신뢰하지 않기 때문입니다.
+
+실 AWS 없이 서명 -> 전송 -> 발급 -> `/verify` 왕복을 처음부터 끝까지 관통하는 경로는 크로스모듈 e2e 테스트입니다.
+
+```
+cd samplego/client && go test -tags e2e ./internal/e2e/...
+```
+
+이 테스트는 실제 서버 라우터(`inbound.NewRouter`)와 실제 아웃바운드 어댑터를 그대로 조립해 `httptest`로 띄우고, 목 STS(`httptest` TLS)로 위임을 흉내냅니다. 클라이언트는 static dummy 자격증명으로 실제 SigV4 서명을 만들어 `/auth`로 보내고, 발급된 JWT 를 `/verify`로 왕복해 클레임까지 확인합니다. 서버 검증 로직을 복제하지 않고 실제 코드를 태우므로, 클라이언트가 만든 엔벨로프가 서버 와이어 계약과 실제로 맞물리는지 검증합니다.
+
+#### 와이어 계약 요약
+
+두 컴포넌트가 주고받는 HTTP 계약은 다음과 같습니다(참고용).
+
+- `POST /auth` 요청 본문: `{method, url, headers(map[string][]string), body(base64 표준 인코딩)}`. 성공은 `200`과 `{token, expires_at(RFC3339)}`, 실패는 `4xx`(형식/신선도/바인딩/허용 신원 등) 또는 `5xx`(위임 upstream 오류 시 `502`)와 `{error, message}` 입니다.
+- `POST /verify` 요청 본문: `{token}`. 성공은 `200`과 발급 토큰의 클레임, 실패는 `4xx`(토큰 검증 실패 `401`, 형식 오류 `400`, 본문 상한 초과 `413` 등) 또는 `5xx`(내부 오류 `500`)와 `{error, message}` 입니다.
 
 ## 제한 사항
 
-{TODO}
+이 샘플은 설계와 흐름을 보이기 위한 것으로, 다음과 같은 범위/전제를 둡니다.
+
+- **헤더 기반 서명만 지원**: 현재 클라이언트/서버는 헤더 기반 SigV4 서명(`X-Amz-Date` 기준)만 지원합니다. 클라이언트가 만료를 직접 지정하는 pre-signed URL 형태(`X-Amz-Expires`)는 후속 작업이며, `--form=presigned`는 명시적으로 거부합니다(`클라이언트 > 보안 고려사항` 참고).
+- **커밋된 샘플 시크릿**: `config.yaml`의 `jwt.signing_secret`은 데모 편의를 위해 저장소에 그대로 커밋된 값입니다. 실 배포에서는 절대 이 값을 쓰지 말고 `JWT_SIGNING_SECRET` 환경변수나 별도 시크릿 관리로 교체하세요.
+- **리전/엔드포인트 로컬 검사 범위**: 클라이언트는 표준 AWS 파티션(global, 표준/gov 리전 등)에 대해서만 `--region`과 `--sts-endpoint`의 로컬 정합성을 검사하고 한쪽에서 다른 쪽을 파생합니다. cn 파티션, dualstack, FIPS dualstack 처럼 손수 목록에 없는 형태는 파생/검사를 건너뛰므로, 그런 대상은 `--sts-endpoint`와 `--region`을 함께 명시해야 합니다.
+- **그럴듯한 리전 오타는 못 거름**: 리전 형식 검사는 리전답지 않은 문자열만 거릅니다. 형식상 정상인 오타(예: `eu-wast-1`)는 로컬에서 통과하며, 실재 여부 판단은 서버 검증(STS 위임)에 위임됩니다.
+- **데모의 STS 는 목/스텁**: 위 로컬 e2e 경로에서 STS 는 실제 AWS 가 아니라 서명을 검증하지 않는 목 서버입니다. 서명 위조 거절 같은 실제 STS 동작은 실 AWS 흐름에서만 확인됩니다.
+- **로컬 전송은 평문 HTTP**: 클라이언트 -> 서버 로컬 전송은 평문 HTTP 를 씁니다. 서명된 요청에는 액세스 키 ID 와 (임시 자격증명이면) 세션 토큰이 담기므로, 실 배포에서는 이 구간을 반드시 HTTPS 로 보호해야 합니다(`개요 > 보안 고려사항` 참고).
 
 ## 참고 자료
 
-{TODO}
+이 샘플이 따르는 PoP 기반 Workload Identity Federation 방식과 그 바탕 기술의 레퍼런스입니다.
+
+- [HashiCorp Vault - AWS(IAM) auth method](https://developer.hashicorp.com/vault/docs/auth/aws): 클라이언트가 서명한 `GetCallerIdentity` 요청을 서버가 STS 로 위임 검증하는 방식의 대표 사례.
+- [AWS IAM Authenticator for Kubernetes](https://github.com/kubernetes-sigs/aws-iam-authenticator): 같은 방식을 pre-signed URL 형태로 적용해 Kubernetes 인증에 쓰는 사례.
+- [AWS STS GetCallerIdentity](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetCallerIdentity.html): 부수효과 없이 호출자 신원(ARN 등)만 돌려주고 별도 권한도 필요 없는, 신원 확인에 쓰는 API.
+- [AWS Signature Version 4 (API 요청 서명)](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html): 이 샘플이 PoP 수단으로 쓰는 요청 서명(SigV4) 문서.
