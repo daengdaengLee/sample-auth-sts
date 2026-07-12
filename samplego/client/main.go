@@ -53,20 +53,26 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	// 3단계. 증명 형태/만료 결정: 현재는 헤더 기반만 지원한다(설정 검증에서 이미 강제). 만료는
-	// 헤더 기반이라 X-Amz-Date(서명 시각)를 기준으로 AWS 가 강제하는 고정 구간이 출발점이며,
-	// 실제 거부는 서버 측 최대 age 검증과 함께 이뤄진다. 서명 시각은 현재 시각으로 둔다.
+	// 3단계. 증명 형태/만료 결정: 헤더 기반은 X-Amz-Date(서명 시각)를 기준으로 AWS 가 강제하는
+	// 고정 구간이 출발점이고, presigned 는 클라이언트가 X-Amz-Expires 로 만료를 직접 지정한다.
+	// 어느 형태든 실제 거부는 서버 측 최대 age 검증과 함께 이뤄진다. 서명 시각은 현재 시각으로 둔다.
 	signedAt := time.Now()
 
 	// 4단계. 서명 + 바인딩: GetCallerIdentity 요청에 SigV4 서명을 만들고 서버 바인딩 헤더를
-	// 서명 범위에 포함한다.
-	env, err := proof.BuildProof(ctx, proof.Input{
+	// 서명 범위에 포함한다. 형태에 따라 헤더 기반(POST) 또는 presigned(GET 쿼리 서명)로 분기한다.
+	in := proof.Input{
 		Credentials:  creds,
 		Endpoint:     cfg.STSEndpoint,
 		Region:       cfg.Region,
 		BindingValue: cfg.BindingValue,
 		SignedAt:     signedAt,
-	})
+		Expiry:       cfg.PresignExpiry,
+	}
+	build := proof.BuildProof
+	if cfg.IsPresigned() {
+		build = proof.BuildPresignedProof
+	}
+	env, err := build(ctx, in)
 	if err != nil {
 		return err
 	}
