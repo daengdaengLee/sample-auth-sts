@@ -47,6 +47,12 @@ const (
 	amzSignatureParam     = "X-Amz-Signature"
 	queryActionKey        = "Action"
 
+	// maxPresignExpirySeconds 는 받아들일 X-Amz-Expires 의 상한(초)이다. AWS 도 presigned URL
+	// 만료를 최대 7일로 두므로 이를 상한으로 삼는다. 서버는 어차피 자체 최대 age 와 교집합(min)을
+	// 취하므로 이보다 큰 만료는 의미가 없고, 상한이 없으면 거대한 값이 time.Duration(int64 ns) 곱셈
+	// 에서 오버플로할 수 있어 여기서 거른다.
+	maxPresignExpirySeconds = 7 * 24 * 60 * 60
+
 	// maxBodyBytes 는 수신 어댑터가 받는 JSON 요청 본문의 최대 바이트다(/auth 서명 엔벨로프,
 	// /verify 토큰 모두 작으므로 넉넉히 1 MiB). 넘으면 413 으로 거부한다. 상한이 없으면 거대한
 	// 본문으로 메모리를 고갈시키는 값싼 DoS 가 가능하다(STS 응답 상한 maxResponseBytes 와 같은 톤).
@@ -107,22 +113,18 @@ func (h *Handler) Authenticate(c *gin.Context) {
 		return
 	}
 
-	// 형태 판별 -> 형태별 추출기로 분기한다. Authorization 헤더가 있으면 헤더 기반, 없고 URL
-	// 쿼리에 X-Amz-Algorithm 이 있으면 presigned 로 본다. 추출기는 실패 시 스스로 응답을 쓰고
-	// false 를 돌려준다(호출부는 즉시 return). 둘 다 아니면 형태를 판별할 수 없어 거부한다.
+	// 형태 판별 -> 형태별 추출기로 분기한다. 지원 형태는 헤더 기반(Authorization 헤더)과 presigned
+	// (URL 쿼리 서명) 둘뿐이므로, Authorization 헤더가 있으면 헤더 기반, 없으면 presigned 로 시도한다.
+	// presigned 도 아니면(X-Amz-Algorithm 쿼리 부재) extractPresignedForm 이 형태 판별 불가로 거부한다.
+	// 추출기는 실패 시 스스로 응답을 쓰고 false 를 돌려준다(호출부는 즉시 return).
 	var (
 		p  extractedProof
 		ok bool
 	)
-	switch {
-	case len(headerValues(req.Headers, authorizationHeader)) > 0:
+	if len(headerValues(req.Headers, authorizationHeader)) > 0 {
 		p, ok = h.extractHeaderForm(c, req, body)
-	case hasPresignQuery(req.URL):
+	} else {
 		p, ok = h.extractPresignedForm(c, req)
-	default:
-		h.logger.InfoContext(ctx, "auth 요청 증명 형태 판별 불가")
-		writeError(c, http.StatusBadRequest, "invalid_signature", "증명 형태를 판별할 수 없음(Authorization 헤더도 presigned 쿼리도 없음)")
-		return
 	}
 	if !ok {
 		return
@@ -199,10 +201,8 @@ func (h *Handler) extractHeaderForm(c *gin.Context, req authRequest, body []byte
 
 	// 바인딩 헤더가 없거나(또는 다중이거나) 서명 범위 밖이면, 이 증명이 이 서버로 바인딩됐다고
 	// 볼 수 없다(혼동된 대리자). 값 대조(코어) 이전에 여기서 거부한다.
-	binding, count, ok := singleSignedValue(req.Headers, signed, bindingHeader)
+	binding, ok := h.signedBinding(c, req.Headers, signed)
 	if !ok {
-		h.logger.WarnContext(ctx, "바인딩 헤더가 없거나 다중이거나 서명 범위 밖", slog.Int("count", count))
-		writeError(c, http.StatusForbidden, "binding_not_signed", "서버 바인딩 헤더가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
 		return extractedProof{}, false
 	}
 
@@ -230,6 +230,14 @@ func (h *Handler) extractPresignedForm(c *gin.Context, req authRequest) (extract
 		return extractedProof{}, false
 	}
 	q := u.Query()
+
+	// 형태 게이트: presigned 는 URL 쿼리에 X-Amz-Algorithm 을 실는다. Authorization 헤더가 없는데
+	// 이마저 없으면 지원하는 두 형태 어디에도 해당하지 않으므로, 형태 판별 불가로 거부한다.
+	if !q.Has(amzAlgorithmParam) {
+		h.logger.InfoContext(ctx, "auth 요청 증명 형태 판별 불가")
+		writeError(c, http.StatusBadRequest, "invalid_signature", "증명 형태를 판별할 수 없음(Authorization 헤더도 presigned 쿼리도 없음)")
+		return extractedProof{}, false
+	}
 
 	// SigV4 쿼리 서명의 필수 파라미터가 각각 정확히 1개로 존재하는지 확인한다(파라미터 오염
 	// 방지). 값 자체의 유효성은 STS 가 서명 재검증에서 본다.
@@ -270,8 +278,10 @@ func (h *Handler) extractPresignedForm(c *gin.Context, req authRequest) (extract
 		return extractedProof{}, false
 	}
 
-	// 만료 근거(Expiry)는 X-Amz-Expires 쿼리에서 얻는다(초 단위 양의 정수). 서버는 이 값을
-	// 맹신하지 않고 자체 최대 age 와 교집합으로만 반영하지만(코어 4단계), 형식/부호는 여기서 건다.
+	// 만료 근거(Expiry)는 X-Amz-Expires 쿼리에서 얻는다(초 단위 양의 정수, 상한 이내). 서버는 이
+	// 값을 맹신하지 않고 자체 최대 age 와 교집합으로만 반영하지만(코어 4단계), 형식/부호/상한은
+	// 여기서 건다. 상한(maxPresignExpirySeconds)은 초 단위를 time.Duration(ns) 으로 곱할 때의
+	// 오버플로도 함께 막는다.
 	rawExpires, ok := singleQueryValue(q, amzExpiresParam)
 	if !ok {
 		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Expires 부재/다중")
@@ -279,19 +289,17 @@ func (h *Handler) extractPresignedForm(c *gin.Context, req authRequest) (extract
 		return extractedProof{}, false
 	}
 	expSecs, err := strconv.Atoi(rawExpires)
-	if err != nil || expSecs <= 0 {
-		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Expires 형식/부호 불량", slog.String("value", rawExpires))
-		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Expires 는 양의 정수(초)여야 함")
+	if err != nil || expSecs <= 0 || expSecs > maxPresignExpirySeconds {
+		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Expires 형식/부호/상한 불량", slog.String("value", rawExpires))
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Expires 는 양의 정수(초)이고 상한 이내여야 함")
 		return extractedProof{}, false
 	}
 
 	// 바인딩 헤더가 실제 헤더로 존재하고 동시에 X-Amz-SignedHeaders 목록에 있어야 통과한다.
 	// presigned 에서 바인딩 값은 쿼리가 아니라 실제 HTTP 헤더로 실리므로, 서명 범위(SignedHeaders)
 	// 안에 없으면 전달 과정에서 값이 바뀌어도 서명이 깨지지 않아 혼동된 대리자 완화가 무력화된다.
-	binding, count, ok := singleSignedValue(req.Headers, signed, bindingHeader)
+	binding, ok := h.signedBinding(c, req.Headers, signed)
 	if !ok {
-		h.logger.WarnContext(ctx, "바인딩 헤더가 없거나 다중이거나 서명 범위 밖", slog.Int("count", count))
-		writeError(c, http.StatusForbidden, "binding_not_signed", "서버 바인딩 헤더가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
 		return extractedProof{}, false
 	}
 
@@ -414,15 +422,18 @@ func singleQueryValue(q url.Values, key string) (string, bool) {
 	return vals[0], true
 }
 
-// hasPresignQuery 는 URL 쿼리에 X-Amz-Algorithm 이 있는지로 presigned 형태를 판별한다. 값의
-// 유효성은 보지 않고(그건 이후 추출/서명 재검증이 맡음) 형태 분기 신호로만 쓴다. 파싱 불가
-// URL 은 presigned 가 아닌 것으로 본다(이후 형태 판별 불가 경로로 떨어진다).
-func hasPresignQuery(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
+// signedBinding 은 바인딩 헤더가 실제 헤더로 정확히 1개 존재하면서 SigV4 서명 범위(SignedHeaders)
+// 에 포함되는지 확인해 그 값을 돌려준다. 두 형태(header/presigned)가 공유하는 혼동된 대리자 검사로,
+// 서명 범위 밖 바인딩은 전달 과정에서 값이 바뀌어도 서명이 깨지지 않아 완화가 무력화되므로 거부한다.
+// 실패 시 스스로 응답(403 binding_not_signed)을 쓰고 ok=false 를 돌려준다.
+func (h *Handler) signedBinding(c *gin.Context, headers map[string][]string, signed map[string]bool) (string, bool) {
+	binding, count, ok := singleSignedValue(headers, signed, bindingHeader)
+	if !ok {
+		h.logger.WarnContext(c.Request.Context(), "바인딩 헤더가 없거나 다중이거나 서명 범위 밖", slog.Int("count", count))
+		writeError(c, http.StatusForbidden, "binding_not_signed", "서버 바인딩 헤더가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
+		return "", false
 	}
-	return u.Query().Has(amzAlgorithmParam)
+	return binding, true
 }
 
 // actionFromForm 은 POST 폼 바디에서 Action 파라미터를 뽑는다(헤더 기반 경로용). 정확히 1개일

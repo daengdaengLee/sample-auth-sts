@@ -236,10 +236,11 @@ func (c Config) validate() error {
 		// 헤더 기반은 만료를 클라이언트가 지정하지 않으므로(X-Amz-Date 기준 고정 구간)
 		// PresignExpiry 는 무의미하다. 형태별 처리라 여기서는 검증하지 않는다.
 	case formPresigned:
-		// presigned 는 클라이언트가 X-Amz-Expires 로 만료를 직접 지정하므로 양수여야 한다.
-		// 0 이하면 유효 구간이 없어져 서버가 항상 신선도 초과로 거부한다.
-		if c.PresignExpiry <= 0 {
-			return fmt.Errorf("presign-expiry 는 양수여야 함(현재 %v): presigned 는 클라이언트가 만료를 직접 지정한다", c.PresignExpiry)
+		// presigned 는 클라이언트가 X-Amz-Expires 로 만료를 직접 지정하므로 양의 초 단위여야 한다.
+		// X-Amz-Expires 는 초 단위 정수라 1초 미만/소수 초는 조용히 잘린다(예: 500ms -> 0). 0 이면
+		// 유효 구간이 없어져 서버/STS 가 불투명하게 거부하므로, 로컬에서 미리 명확히 거른다.
+		if c.PresignExpiry <= 0 || c.PresignExpiry%time.Second != 0 {
+			return fmt.Errorf("presign-expiry 는 양의 초 단위여야 함(현재 %v): X-Amz-Expires 는 초 단위 정수라 1초 미만/소수 초는 잘린다", c.PresignExpiry)
 		}
 	default:
 		return fmt.Errorf("form 값이 올바르지 않음(%q): header/presigned 만 지원", c.Form)
