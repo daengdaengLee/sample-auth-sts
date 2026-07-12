@@ -272,8 +272,16 @@ func TestParse_presignExpiry(t *testing.T) {
 	if _, err := parse("client", []string{"--form", "presigned", "--presign-expiry", "-1s"}, noEnv, io.Discard); err == nil {
 		t.Error("presigned + 음수 만료인데 에러가 없음")
 	}
+	// X-Amz-Expires 는 초 단위 정수라 1초 미만은 0 으로 잘려 서버가 거부하므로 로컬에서 미리 거른다.
+	if _, err := parse("client", []string{"--form", "presigned", "--presign-expiry", "500ms"}, noEnv, io.Discard); err == nil {
+		t.Error("presigned + 1초 미만 만료인데 에러가 없음(0 으로 잘림)")
+	}
+	// 소수 초(1.5s)도 조용히 잘리므로 거부한다(초 단위 강제).
+	if _, err := parse("client", []string{"--form", "presigned", "--presign-expiry", "1500ms"}, noEnv, io.Discard); err == nil {
+		t.Error("presigned + 소수 초 만료인데 에러가 없음(초 단위로 잘림)")
+	}
 
-	// header 형태는 만료가 무의미하므로 0 이하여도 통과해야 한다(형태별 처리).
+	// header 형태는 만료가 무의미하므로 0 이하/소수 초여도 통과해야 한다(형태별 처리).
 	if _, err := parse("client", []string{"--form", "header", "--presign-expiry", "0s"}, noEnv, io.Discard); err != nil {
 		t.Errorf("header 형태인데 만료 0 으로 거부됨: %v", err)
 	}

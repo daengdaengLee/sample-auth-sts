@@ -247,6 +247,16 @@ func TestAuthenticate_presignedPreValidation(t *testing.T) {
 			},
 			wantStatus: http.StatusBadRequest,
 		},
+		{
+			name: "X-Amz-Expires 상한 초과",
+			mutate: func(e *authRequest) {
+				q := presignedQuery()
+				// AWS presigned 최대 7일(604800s)을 넘긴다(오버플로/남용 방지 상한).
+				q.Set("X-Amz-Expires", "604801")
+				*e = presignedEnvelopeFrom(q)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
 	}
 
 	for _, tc := range cases {
