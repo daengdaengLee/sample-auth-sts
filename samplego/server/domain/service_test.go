@@ -157,6 +157,100 @@ func TestService_Authenticate_rejections(t *testing.T) {
 	}
 }
 
+// presignedRequest 는 모든 로컬 검증을 통과하는 기준 presigned SignedRequest 를 만든다.
+// header 형태(validRequest)와 달리 Form=presigned, Method=GET 이고, 클라이언트가 지정한 만료
+// (Expiry)를 담는다. 각 테스트는 필요한 필드만 바꿔 특정 검증 실패를 재현한다.
+func presignedRequest() SignedRequest {
+	req := validRequest()
+	req.Form = FormPresigned
+	req.Method = "GET"
+	req.Expiry = 2 * time.Minute
+	return req
+}
+
+// TestService_Authenticate_presignedSuccess 는 presigned 형태(GET + 클라이언트 만료)가 모든
+// 검증을 통과해 자격이 발급되는지 확인한다(GET 이 형태 검증에서 거부되지 않아야 한다).
+func TestService_Authenticate_presignedSuccess(t *testing.T) {
+	svc, verifier, issuer := newService(defaultPolicy())
+
+	_, err := svc.Authenticate(context.Background(), AuthenticateInput{Request: presignedRequest()})
+	if err != nil {
+		t.Fatalf("presigned 인데 예상치 못한 에러: %v", err)
+	}
+	if !verifier.called || !issuer.called {
+		t.Error("presigned 성공 경로인데 위임/발급 포트가 호출되지 않음")
+	}
+}
+
+// TestService_Authenticate_presignedShape 는 형태별 기대 메서드가 강제되는지 확인한다:
+// presigned 는 GET 이어야 하고(POST 면 invalid_shape), header 는 POST 여야 한다(GET 면 invalid_shape).
+func TestService_Authenticate_presignedShape(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(r *SignedRequest)
+	}{
+		{"presigned + POST 는 거부", func(r *SignedRequest) { *r = presignedRequest(); r.Method = "POST" }},
+		{"header + GET 는 거부", func(r *SignedRequest) { *r = validRequest(); r.Method = "GET" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _ := newService(defaultPolicy())
+			var req SignedRequest
+			tc.mutate(&req)
+
+			_, err := svc.Authenticate(context.Background(), AuthenticateInput{Request: req})
+			re, ok := AsRejection(err)
+			if !ok {
+				t.Fatalf("거부 에러가 아님: %v", err)
+			}
+			if re.Reason != ReasonInvalidShape {
+				t.Errorf("거부 사유 = %q, want %q", re.Reason, ReasonInvalidShape)
+			}
+		})
+	}
+}
+
+// TestService_Authenticate_presignedFreshness 는 presigned 유효 구간이 서버 최대 age 와 클라이언트
+// 만료(Expiry)의 교집합(min)임을 확인한다. 서버 정책 maxAge 는 5m 고정(defaultPolicy).
+func TestService_Authenticate_presignedFreshness(t *testing.T) {
+	cases := []struct {
+		name     string
+		expiry   time.Duration
+		age      time.Duration // baseTime - SignedAt
+		wantPass bool
+	}{
+		// 클라이언트가 만료를 서버보다 짧게(1m) 잡으면 그만큼 창이 좁아진다.
+		{"클라이언트 만료가 서버보다 짧고 그 안", 1 * time.Minute, 30 * time.Second, true},
+		{"클라이언트 만료 초과(서버 max-age 안이라도 거부)", 1 * time.Minute, 2 * time.Minute, false},
+		// 클라이언트가 만료를 서버보다 길게(10m) 잡아도 서버 max-age(5m)를 넘기면 거부된다(맹신 금지).
+		{"서버 max-age 안", 10 * time.Minute, 4 * time.Minute, true},
+		{"서버 max-age 초과(클라이언트 만료가 더 길어도 거부)", 10 * time.Minute, 7 * time.Minute, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _ := newService(defaultPolicy())
+			req := presignedRequest()
+			req.Expiry = tc.expiry
+			req.SignedAt = baseTime.Add(-tc.age)
+
+			_, err := svc.Authenticate(context.Background(), AuthenticateInput{Request: req})
+			if tc.wantPass {
+				if err != nil {
+					t.Fatalf("통과 기대인데 에러: %v", err)
+				}
+				return
+			}
+			re, ok := AsRejection(err)
+			if !ok {
+				t.Fatalf("거부 에러가 아님: %v", err)
+			}
+			if re.Reason != ReasonStale {
+				t.Errorf("거부 사유 = %q, want %q", re.Reason, ReasonStale)
+			}
+		})
+	}
+}
+
 // TestService_Authenticate_verifierError 는 신원 검증 포트의 인프라 실패가 거부가 아니라
 // 원래 에러 그대로 전파되고, 자격 발급으로 이어지지 않는지 확인한다.
 func TestService_Authenticate_verifierError(t *testing.T) {
