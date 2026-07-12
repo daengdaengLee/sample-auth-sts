@@ -37,9 +37,12 @@ const (
 	// 정확히 1개(GetCallerIdentity)인지 확인한다(전달 요청 형태 검증).
 	formBody = "Action=GetCallerIdentity&Version=2011-06-15"
 
-	// actionValue, versionValue 는 presigned GET 요청의 쿼리 파라미터 값이다. 헤더 기반이
-	// formBody 로 싣는 것과 같은 Action/Version 을 presigned 에서는 URL 쿼리로 싣는다. 서버는
-	// 쿼리에서 Action 을 뽑아 GetCallerIdentity 인지 확인한다.
+	// actionKey, versionKey 는 presigned GET 요청 쿼리 파라미터의 이름이고, actionValue,
+	// versionValue 는 그 값이다. 헤더 기반이 formBody 로 싣는 것과 같은 Action/Version 을
+	// presigned 에서는 URL 쿼리로 싣는다. 서버는 쿼리에서 Action 을 뽑아 GetCallerIdentity 인지
+	// 확인한다. 이름도 상수로 두어 값 상수와 대칭을 맞춘다(규약 변경 시 누락 방지).
+	actionKey    = "Action"
+	versionKey   = "Version"
 	actionValue  = "GetCallerIdentity"
 	versionValue = "2011-06-15"
 
@@ -136,8 +139,8 @@ func BuildPresignedProof(ctx context.Context, in Input) (Envelope, error) {
 	// Action/Version 과 만료를 쿼리에 넣는다. X-Amz-Expires 는 초 단위 정수이며, presign 전에
 	// 넣어야 서명 범위(canonical 쿼리)에 포함돼 위변조가 서명을 깨뜨린다.
 	q := u.Query()
-	q.Set("Action", actionValue)
-	q.Set("Version", versionValue)
+	q.Set(actionKey, actionValue)
+	q.Set(versionKey, versionValue)
 	q.Set(amzExpiresParam, strconv.FormatInt(int64(in.Expiry/time.Second), 10))
 	u.RawQuery = q.Encode()
 
