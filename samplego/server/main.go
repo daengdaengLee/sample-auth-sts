@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -129,6 +130,22 @@ func buildServices(logger *slog.Logger) (domain.Authenticator, domain.TokenVerif
 
 	clk := clock.New()
 	httpClient := &http.Client{Timeout: stsRequestTimeout}
+
+	// 데모 전용 STS CA 신뢰: sts.ca_file(STS_CA_FILE)이 설정돼 있으면 그 PEM 의 CA 만 담은
+	// RootCAs 를 STS http.Client 에 걸어, 실 AWS 없이 목 STS(cmd/mocksts)의 self-signed 인증서를
+	// 신뢰하게 한다. "지정한 CA 만 신뢰"하는 표준 TLS 방식이며, InsecureSkipVerify(검증 끄기)는
+	// 절대 쓰지 않는다. 미설정이면 시스템 신뢰 저장소를 쓰는 기본 클라이언트를 그대로 둔다(실 STS
+	// 흐름). 이 옵션은 데모 전용이라 실 배포에서는 쓰지 말 것(config.yaml 주석/README 참고).
+	if caFile := sts.LoadCAFile(v); caFile != "" {
+		pool, err := sts.LoadCAPool(caFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		}
+		logger.Info("데모 전용 STS CA 신뢰 로드", slog.String("sts_ca_file", caFile))
+	}
 
 	// NewVerifier 는 허용 엔드포인트를 읽어 Verifier 를 만들고, 정규화를 통과한 유효 엔드포인트가
 	// 하나도 없으면(공백뿐 아니라 https 아님 같은 오설정 포함) 에러로 부팅을 실패시킨다.

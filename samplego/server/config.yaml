@@ -40,3 +40,11 @@ sts:
   # endpoint_allowlist 는 위임을 허용할 진짜 STS 엔드포인트 목록이다(5단계). 쉼표로 구분하며,
   # 미설정/빈 값이면 아무 엔드포인트도 허용하지 않는다(전부 거부). env override: STS_ENDPOINT_ALLOWLIST.
   endpoint_allowlist: "https://sts.amazonaws.com"
+
+  # ca_file 은 데모 전용 옵션이다. 설정하면 STS 위임에 쓰는 http.Client 가 이 PEM 의 CA 만 추가로
+  # 신뢰한다(RootCAs). 실 AWS 없이 목 STS(cmd/mocksts)로 로컬 데모를 돌릴 때, 목 STS 가 부팅 때
+  # 생성해 내보낸 self-signed CA 를 여기로 가리켜 server -> 목 STS 구간의 TLS 신뢰를 잇는 용도다.
+  # "지정한 CA 만 신뢰"하는 표준 TLS 방식이며 InsecureSkipVerify(검증 끄기)는 쓰지 않는다. 미설정/
+  # 빈 값이면 시스템 신뢰 저장소만 쓴다(실 STS 흐름, 기본 동작). 데모 전용이므로 실 배포에서는 쓰지
+  # 말 것. env override: STS_CA_FILE(예: STS_CA_FILE=./mocksts-ca.pem).
+  # ca_file: ""
