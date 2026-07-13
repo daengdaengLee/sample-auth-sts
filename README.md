@@ -410,7 +410,7 @@ make check
 - **리전/엔드포인트 로컬 검사 범위**: 클라이언트는 표준 AWS 파티션(global, 표준/gov 리전 등)에 대해서만 `--region`과 `--sts-endpoint`의 로컬 정합성을 검사하고 한쪽에서 다른 쪽을 파생합니다. cn 파티션, dualstack, FIPS dualstack 처럼 손수 목록에 없는 형태는 파생/검사를 건너뛰므로, 그런 대상은 `--sts-endpoint`와 `--region`을 함께 명시해야 합니다.
 - **그럴듯한 리전 오타는 못 거름**: 리전 형식 검사는 리전답지 않은 문자열만 거릅니다. 형식상 정상인 오타(예: `eu-wast-1`)는 로컬에서 통과하며, 실재 여부 판단은 서버 검증(STS 위임)에 위임됩니다.
 - **데모의 STS 는 목/스텁**: 로컬 데모/e2e 경로에서 STS 는 실제 AWS 가 아니라 서명을 검증하지 않는 목 서버입니다(누가 서명했든 성공 XML 을 돌려줍니다). 서명 위조 거절 같은 실제 STS 동작은 실 AWS 흐름에서만 확인됩니다.
-- **데모 전용 CA 신뢰/인증서**: 로컬 데모의 목 STS(`samplego/server/cmd/mocksts`)는 부팅 때 self-signed 인증서를 생성해 그 CA 를 파일로 내보내고, 서버는 `sts.ca_file`(`STS_CA_FILE`)로 그 CA 만 추가로 신뢰합니다. 이는 "지정한 CA 만 신뢰"하는 표준 TLS 방식이며 검증을 끄지 않습니다(`InsecureSkipVerify` 를 쓰지 않음). 생성 CA(`mocksts-ca.pem`)와 목 STS, `sts.ca_file` 옵션은 오로지 데모 전용이라 저장소에 커밋하지 않으며(`.gitignore` 처리) 실 배포에서는 쓰지 마세요.
+- **데모 전용 CA 신뢰/인증서**: 로컬 데모의 목 STS(`samplego/server/cmd/mocksts`)는 부팅 때 self-signed 인증서를 생성해 그 CA 를 파일로 내보내고, 서버는 `sts.ca_file`(`STS_CA_FILE`)로 그 CA 를 신뢰합니다. 이는 "지정한 CA 만 신뢰"하는 표준 TLS 방식이며 검증을 끄지 않습니다(`InsecureSkipVerify` 를 쓰지 않음). 다만 이 옵션을 설정하면 시스템 신뢰 저장소 대신 이 CA 만 배타적으로 신뢰하므로(추가가 아니라 대체), 실 STS 를 대상으로는 켜지 마세요(실 AWS TLS 가 unknown authority 로 실패합니다). 생성 CA(`mocksts-ca.pem`)와 목 STS, `sts.ca_file` 옵션은 오로지 데모 전용이라 저장소에 커밋하지 않으며(`.gitignore` 처리) 실 배포에서는 쓰지 마세요.
 - **로컬 전송은 평문 HTTP**: 클라이언트 -> 서버 로컬 전송은 평문 HTTP 를 씁니다. 서명된 요청에는 액세스 키 ID 와 (임시 자격증명이면) 세션 토큰이 담기므로, 실 배포에서는 이 구간을 반드시 HTTPS 로 보호해야 합니다(`개요 > 보안 고려사항` 참고).
 
 ## 참고 자료
