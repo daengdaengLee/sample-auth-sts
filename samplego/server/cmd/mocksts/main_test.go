@@ -67,3 +67,45 @@ func TestHandler(t *testing.T) {
 		})
 	}
 }
+
+// TestHandler_escapesXMLMetacharacters 는 신원 값에 XML 메타문자(&/</>)가 들어도 응답이 깨진
+// XML 이 아니라 정상 이스케이프돼, 서버 파싱 struct 로 원값이 그대로 복원되는지 확인한다.
+// fmt 문자열 조립이었다면 깨진 XML 로 서버 파싱이 실패했을 회귀를 가드한다.
+func TestHandler_escapesXMLMetacharacters(t *testing.T) {
+	const (
+		arn     = "arn:aws:iam::123456789012:role/team&ops<x>"
+		account = "123456789012"
+		userID  = "AIDA&EXAMPLE"
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("Action=GetCallerIdentity&Version=2011-06-15"))
+	handler(arn, account, userID)(rec, req)
+
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	// 이스케이프된 형태(&amp; 등)로 실려 있어야 하며, 원문 그대로면(깨진 XML) 아래 파싱이 실패한다.
+	if strings.Contains(string(body), "team&ops") {
+		t.Errorf("응답에 이스케이프되지 않은 & 가 그대로 들어 있음:\n%s", body)
+	}
+
+	var parsed struct {
+		Result struct {
+			Arn     string `xml:"Arn"`
+			UserID  string `xml:"UserId"`
+			Account string `xml:"Account"`
+		} `xml:"GetCallerIdentityResult"`
+	}
+	if err := xml.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("응답 XML 파싱 실패(이스케이프 누락): %v\n본문: %s", err, body)
+	}
+	if parsed.Result.Arn != arn {
+		t.Errorf("Arn=%q, want %q", parsed.Result.Arn, arn)
+	}
+	if parsed.Result.UserID != userID {
+		t.Errorf("UserId=%q, want %q", parsed.Result.UserID, userID)
+	}
+}

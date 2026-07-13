@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -110,17 +111,26 @@ func run() error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-// successXML 은 GetCallerIdentity 성공 응답(XML) 템플릿이다. 서버 STS 어댑터의
-// getCallerIdentityResponse 가 로컬 이름 기준(네임스페이스 무시)으로 Arn/UserId/Account 를
-// 뽑으므로, 요소 이름만 맞으면 된다. 값은 데모 운영자가 플래그로 주는 신뢰 입력이라 그대로
-// 끼워 넣는다.
-const successXML = `<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
-  <GetCallerIdentityResult>
-    <Arn>%s</Arn>
-    <UserId>%s</UserId>
-    <Account>%s</Account>
-  </GetCallerIdentityResult>
-</GetCallerIdentityResponse>`
+// stsNamespace 는 GetCallerIdentity 응답의 XML 네임스페이스다(실제 STS 와 동일). 서버 STS
+// 어댑터는 로컬 이름 기준으로 파싱해 네임스페이스를 무시하지만, 실제 응답 형태와 맞춰 둔다.
+const stsNamespace = "https://sts.amazonaws.com/doc/2011-06-15/"
+
+// stsResult 는 GetCallerIdentity 성공 응답의 신원 필드다.
+type stsResult struct {
+	Arn     string `xml:"Arn"`
+	UserID  string `xml:"UserId"`
+	Account string `xml:"Account"`
+}
+
+// stsResponse 는 GetCallerIdentity 성공 응답(XML)이다. encoding/xml 로 마샬해 값에 XML
+// 메타문자(&/</>)가 들어도 안전하게 이스케이프한다(fmt 문자열 조립은 깨진 XML 을 낼 수 있다).
+// 서버 STS 어댑터의 getCallerIdentityResponse 가 로컬 이름 기준으로 뽑으므로 요소 이름만 맞으면
+// 된다. xmlns 는 attr 로 실어 실제 응답 형태를 유지한다.
+type stsResponse struct {
+	XMLName xml.Name  `xml:"GetCallerIdentityResponse"`
+	Xmlns   string    `xml:"xmlns,attr"`
+	Result  stsResult `xml:"GetCallerIdentityResult"`
+}
 
 // handler 는 메서드/경로와 무관하게(헤더 기반 POST, presigned GET 모두) 서명을 검증하지 않고
 // 고정 신원의 GetCallerIdentity 성공 XML 을 돌려준다. 실제 STS 는 서명을 검증하지만, 데모의
@@ -130,7 +140,18 @@ func handler(arn, account, userID string) http.HandlerFunc {
 		// 본문을 끝까지 읽어 커넥션 재사용을 돕는다(내용은 검증하지 않는다).
 		_, _ = io.Copy(io.Discard, r.Body)
 		log.Printf("위임 수신: %s %s", r.Method, r.URL.RequestURI())
+
+		body, err := xml.MarshalIndent(stsResponse{
+			Xmlns:  stsNamespace,
+			Result: stsResult{Arn: arn, UserID: userID, Account: account},
+		}, "", "  ")
+		if err != nil {
+			// 데모 응답 마샬은 실패할 이유가 없지만, 실패 시 인프라 오류로 알린다.
+			http.Error(w, "응답 XML 생성 실패", http.StatusInternalServerError)
+			return
+		}
+
 		w.Header().Set("Content-Type", "text/xml")
-		_, _ = fmt.Fprintf(w, successXML, arn, userID, account)
+		_, _ = w.Write(body)
 	}
 }
