@@ -27,9 +27,24 @@ const (
 	formHeader = "header"
 
 	// formPresigned 는 pre-signed URL 형태(X-Amz-Expires 로 만료 직접 지정, 예: AWS IAM
-	// Authenticator)를 가리킨다. 후속 작업이며, 현재는 명시적으로 거부한다.
+	// Authenticator)를 가리킨다. 클라이언트가 GET GetCallerIdentity 를 쿼리 서명하고, 만료를
+	// --presign-expiry 로 직접 지정한다.
 	formPresigned = "presigned"
+
+	// defaultPresignExpiry 는 presigned 만료(X-Amz-Expires)의 기본값이다. 서버 정책 기본값
+	// policy.request_max_age(5m)와 맞춰, 유효 구간(서버 max-age 와 클라이언트 만료의 교집합)이
+	// 기본 상태에서 서버 창과 같아 로컬 데모가 별도 튜닝 없이 통과하게 한다. presigned 의 이점은
+	// 이 값을 서버 max-age 보다 더 짧게 잡아 재전송 창을 클라이언트 쪽에서 좁히는 데 있다.
+	defaultPresignExpiry = "5m"
 )
+
+// MaxPresignExpiry 는 presigned 만료(--presign-expiry)의 상한이다. 서버 수신 어댑터의
+// MaxPresignExpirySeconds(604800s, AWS presigned 최대 7일)와 같은 값으로, 서버가 상한 초과
+// X-Amz-Expires 를 거부하므로 클라이언트도 로컬에서 먼저 명확히 거른다(로컬 수락 -> 원격 거부
+// 방지). 두 모듈이 분리돼 상수를 공유할 수 없어 값이 중복되는데, 이는 기본값을 서버 config.yaml
+// 과 정렬해 양쪽에 두는 것과 같은 톤이다. 두 값이 어긋나면 그 안티패턴이 재발하므로, 크로스모듈
+// e2e 테스트가 서버 상한과 초 환산 동일성을 단언한다(그 대조를 위해 export 한다).
+const MaxPresignExpiry = 7 * 24 * time.Hour
 
 // Config 는 클라이언트가 증명을 만들어 보내는 데 필요한 설정 묶음이다. 기본값은 서버
 // config.yaml 과 정렬해, 로컬 데모가 추가 설정 없이 바로 통과하도록 맞춘다.
@@ -49,8 +64,13 @@ type Config struct {
 	// sts.amazonaws.com 은 us-east-1).
 	Region string
 
-	// Form 은 증명 형태다(header/presigned). 현재는 header 만 유효하다.
+	// Form 은 증명 형태다(header/presigned).
 	Form string
+
+	// PresignExpiry 는 presigned 형태에서 X-Amz-Expires 로 지정할 만료(서명 시각 기준 유효 구간
+	// 길이)다. header 형태에서는 의미가 없어 쓰이지 않는다. 서버는 이 값을 자체 max-age 와
+	// 교집합으로만 반영하므로(맹신하지 않음), 서버 max-age 보다 길게 잡아도 그만큼 늘어나지 않는다.
+	PresignExpiry time.Duration
 
 	// Verify 는 발급받은 토큰을 /verify 로 왕복 확인할지 여부다(데모 편의).
 	Verify bool
@@ -86,7 +106,8 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 	bindingValue := fs.String("binding-value", envOr(getenv, "CLIENT_BINDING_VALUE", "https://server.example/audience"), "서명 범위에 넣을 서버 바인딩 헤더 값")
 	stsEndpoint := fs.String("sts-endpoint", envOr(getenv, "STS_ENDPOINT", "https://sts.amazonaws.com"), "SigV4 서명/위임 대상 STS 엔드포인트(https)")
 	region := fs.String("region", envOr(getenv, "AWS_REGION", "us-east-1"), "SigV4 서명 리전")
-	form := fs.String("form", envOr(getenv, "CLIENT_PROOF_FORM", formHeader), "증명 형태(header 만 지원, presigned 는 후속)")
+	form := fs.String("form", envOr(getenv, "CLIENT_PROOF_FORM", formHeader), "증명 형태(header/presigned)")
+	presignExpiryRaw := fs.String("presign-expiry", envOr(getenv, "CLIENT_PRESIGN_EXPIRY", defaultPresignExpiry), "presigned 만료(X-Amz-Expires, time.ParseDuration 형식). header 형태에서는 무시")
 	verify := fs.Bool("verify", envBool(getenv, "CLIENT_VERIFY"), "발급 토큰을 /verify 로 왕복 확인")
 	timeoutRaw := fs.String("timeout", envOr(getenv, "CLIENT_TIMEOUT", "30s"), "실행 전체(자격증명 획득 + 서버 요청)의 최대 소요 시간(time.ParseDuration 형식)")
 
@@ -104,6 +125,14 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 	timeout, err := time.ParseDuration(*timeoutRaw)
 	if err != nil {
 		return Config{}, fmt.Errorf("timeout 파싱 실패(%q): %w", *timeoutRaw, err)
+	}
+
+	// presign-expiry 도 같은 톤으로 파싱한다(형식 오류는 로드 시점, 양수/형태별 필요 검증은
+	// validate 가 맡는다). header 형태여도 파싱은 하되(기본값이 항상 있음) validate 가 형태별로
+	// 필요 여부를 가른다.
+	presignExpiry, err := time.ParseDuration(*presignExpiryRaw)
+	if err != nil {
+		return Config{}, fmt.Errorf("presign-expiry 파싱 실패(%q): %w", *presignExpiryRaw, err)
 	}
 
 	// region 과 sts-endpoint 는 반드시 일치해야 하는데 기본값이 독립 소스(AWS_REGION 대 global)라
@@ -160,6 +189,7 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 		STSEndpoint:        endpointVal,
 		Region:             regionVal,
 		Form:               *form,
+		PresignExpiry:      presignExpiry,
 		Verify:             *verify,
 		Timeout:            timeout,
 		StaticCreds:        *staticCreds,
@@ -175,7 +205,7 @@ func parse(name string, args []string, getenv func(string) string, errOut io.Wri
 }
 
 // validate 는 필수값과 형태 제약을 확인한다. 빈 값은 데모를 조용히 실패시키므로 로드 시점에
-// 드러내고, 미지원 형태(presigned)는 여기서 명확히 거른다(후속 작업 안내).
+// 드러내고, 형태별 제약(presigned 는 만료가 양수여야 함)과 알 수 없는 형태를 여기서 거른다.
 func (c Config) validate() error {
 	if c.ServerAddr == "" {
 		return fmt.Errorf("server-addr 가 비어 있음")
@@ -211,11 +241,22 @@ func (c Config) validate() error {
 	}
 	switch c.Form {
 	case formHeader:
-		// 현재 서버가 지원하는 유일한 형태다.
+		// 헤더 기반은 만료를 클라이언트가 지정하지 않으므로(X-Amz-Date 기준 고정 구간)
+		// PresignExpiry 는 무의미하다. 형태별 처리라 여기서는 검증하지 않는다.
 	case formPresigned:
-		return fmt.Errorf("form=presigned 는 아직 미지원(후속): 현재 서버는 헤더 기반만 받는다")
+		// presigned 는 클라이언트가 X-Amz-Expires 로 만료를 직접 지정하므로 양의 초 단위여야 한다.
+		// X-Amz-Expires 는 초 단위 정수라 1초 미만/소수 초는 조용히 잘린다(예: 500ms -> 0). 0 이면
+		// 유효 구간이 없어져 서버/STS 가 불투명하게 거부하므로, 로컬에서 미리 명확히 거른다.
+		if c.PresignExpiry <= 0 || c.PresignExpiry%time.Second != 0 {
+			return fmt.Errorf("presign-expiry 는 양의 초 단위여야 함(현재 %v): X-Amz-Expires 는 초 단위 정수라 1초 미만/소수 초는 잘린다", c.PresignExpiry)
+		}
+		// 상한도 서버와 맞춰 로컬에서 거른다. 서버가 상한 초과를 거부하므로(그리고 서버 max-age
+		// 와의 교집합상 이보다 큰 만료는 어차피 무의미), 로컬 수락 후 원격 거부로 이어지지 않게 한다.
+		if c.PresignExpiry > MaxPresignExpiry {
+			return fmt.Errorf("presign-expiry 는 상한(%v) 이내여야 함(현재 %v): 서버가 상한 초과 X-Amz-Expires 를 거부한다", MaxPresignExpiry, c.PresignExpiry)
+		}
 	default:
-		return fmt.Errorf("form 값이 올바르지 않음(%q): header 만 지원", c.Form)
+		return fmt.Errorf("form 값이 올바르지 않음(%q): header/presigned 만 지원", c.Form)
 	}
 	if c.Timeout <= 0 {
 		return fmt.Errorf("timeout 은 양수여야 함(현재 %v): 0 이하면 요청 경계가 없어진다", c.Timeout)
@@ -224,6 +265,12 @@ func (c Config) validate() error {
 		return fmt.Errorf("static-creds 사용 시 static-access-key-id 와 static-secret-key 가 필요함")
 	}
 	return nil
+}
+
+// IsPresigned 는 증명 형태가 presigned 인지 돌려준다. form 상수는 이 패키지 안에 감추고,
+// main 이 문자열 리터럴 비교 대신 이 헬퍼로 경로를 분기하게 한다.
+func (c Config) IsPresigned() bool {
+	return c.Form == formPresigned
 }
 
 // envOr 는 환경변수 key 가 비어 있지 않으면 그 값을, 아니면 fallback 을 돌려준다. 플래그

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -88,6 +89,234 @@ func validEnvelope() authRequest {
 		},
 		Body: base64.StdEncoding.EncodeToString([]byte("Action=GetCallerIdentity&Version=2011-06-15")),
 	}
+}
+
+// presignedQuery 는 모든 사전검증을 통과하는 기준 presigned 쿼리 파라미터를 만든다. 서버는
+// 서명을 검증하지 않고 파라미터의 존재/형식/서명 범위만 보므로, 서명값은 임의 문자열로 둔다.
+// X-Amz-SignedHeaders 에 host 와 x-server-binding 을 모두 넣어 바인딩이 서명 범위에 들게 한다.
+func presignedQuery() url.Values {
+	q := url.Values{}
+	q.Set("Action", "GetCallerIdentity")
+	q.Set("Version", "2011-06-15")
+	q.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	q.Set("X-Amz-Credential", "AKID/20260708/us-east-1/sts/aws4_request")
+	q.Set("X-Amz-Date", "20260708T120000Z")
+	q.Set("X-Amz-Expires", "60")
+	q.Set("X-Amz-SignedHeaders", "host;x-server-binding")
+	q.Set("X-Amz-Signature", "abcd")
+	return q
+}
+
+// presignedEnvelopeFrom 은 주어진 쿼리로 presigned authRequest 를 만든다. presigned 는 인증
+// 정보를 URL 쿼리에 싣고(Authorization 헤더 없음), 헤더로는 서명 범위에 든 X-Server-Binding 과
+// Host 만 보내며, body 는 빈 값이다.
+func presignedEnvelopeFrom(q url.Values) authRequest {
+	return authRequest{
+		Method: "GET",
+		URL:    "https://sts.amazonaws.com/?" + q.Encode(),
+		Headers: map[string][]string{
+			"Host":             {"sts.amazonaws.com"},
+			"X-Server-Binding": {"https://server.example/audience"},
+		},
+		Body: "",
+	}
+}
+
+// validPresignedEnvelope 는 모든 사전검증을 통과하는 기준 presigned 엔벨로프를 만든다.
+func validPresignedEnvelope() authRequest {
+	return presignedEnvelopeFrom(presignedQuery())
+}
+
+// TestAuthenticate_presignedSuccess 는 presigned 엔벨로프에서 SignedRequest 필드(Form/Method/
+// Action/SignedAt/Expiry/BindingValue)가 올바로 유도돼 코어로 넘어가는지 확인한다.
+func TestAuthenticate_presignedSuccess(t *testing.T) {
+	exp := time.Date(2026, 7, 8, 12, 15, 0, 0, time.UTC)
+	fake := &fakeAuthenticator{out: domain.AuthenticateOutput{
+		Credential: domain.Credential{Token: "issued.jwt.token", ExpiresAt: exp},
+	}}
+
+	env := validPresignedEnvelope()
+	rec := doAuth(newAuthEngine(fake), mustJSON(t, env))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !fake.called {
+		t.Fatal("인바운드 포트가 호출되지 않음")
+	}
+	sr := fake.gotIn.Request
+	if sr.Form != domain.FormPresigned {
+		t.Errorf("Form = %q, want presigned", sr.Form)
+	}
+	if sr.Method != "GET" {
+		t.Errorf("Method = %q, want GET", sr.Method)
+	}
+	if sr.Action != "GetCallerIdentity" {
+		t.Errorf("Action = %q, want GetCallerIdentity", sr.Action)
+	}
+	if sr.BindingValue != "https://server.example/audience" {
+		t.Errorf("BindingValue = %q", sr.BindingValue)
+	}
+	wantAt := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	if !sr.SignedAt.Equal(wantAt) {
+		t.Errorf("SignedAt = %v, want %v", sr.SignedAt, wantAt)
+	}
+	if sr.Expiry != 60*time.Second {
+		t.Errorf("Expiry = %v, want 60s", sr.Expiry)
+	}
+	// 원본 요청이 재구성 없이 그대로 위임되도록 넘어가는지 확인한다.
+	if sr.Original.Method != "GET" || sr.Original.URL != env.URL {
+		t.Errorf("Original(method=%q, url=%q) 가 엔벨로프와 다름", sr.Original.Method, sr.Original.URL)
+	}
+}
+
+// TestAuthenticate_presignedExpiryBoundary 는 정확히 상한(MaxPresignExpirySeconds)인 X-Amz-Expires
+// 가 수락되어 코어로 넘어가는지 확인한다. 상한 검사가 실수로 > 대신 >= 가 되는 off-by-one 회귀가
+// 나면(경계값 거부) 이 테스트가 실패한다. 초과(604801)/거대값 거부는 preValidation 표가 덮는다.
+func TestAuthenticate_presignedExpiryBoundary(t *testing.T) {
+	fake := &fakeAuthenticator{out: domain.AuthenticateOutput{
+		Credential: domain.Credential{Token: "t", ExpiresAt: time.Unix(0, 0)},
+	}}
+
+	q := presignedQuery()
+	q.Set("X-Amz-Expires", fmt.Sprintf("%d", MaxPresignExpirySeconds))
+	env := presignedEnvelopeFrom(q)
+
+	rec := doAuth(newAuthEngine(fake), mustJSON(t, env))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (경계값 상한은 수락되어야 함, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !fake.called {
+		t.Fatal("경계값 상한인데 코어가 호출되지 않음")
+	}
+	if got, want := fake.gotIn.Request.Expiry, time.Duration(MaxPresignExpirySeconds)*time.Second; got != want {
+		t.Errorf("Expiry = %v, want %v", got, want)
+	}
+}
+
+// TestAuthenticate_presignedPreValidation 은 presigned 사전검증 실패가 올바른 상태로 매핑되고,
+// 코어를 호출하지 않는지 표로 확인한다. 쿼리는 presignedQuery 를 기준으로 필요한 것만 바꾼다.
+func TestAuthenticate_presignedPreValidation(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(e *authRequest)
+		wantStatus int
+	}{
+		{
+			name:       "X-Amz-Algorithm 부재(형태 판별 불가)",
+			mutate:     func(e *authRequest) { *e = presignedEnvelopeFrom(without(presignedQuery(), "X-Amz-Algorithm")) },
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "X-Amz-Credential 부재",
+			mutate:     func(e *authRequest) { *e = presignedEnvelopeFrom(without(presignedQuery(), "X-Amz-Credential")) },
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "X-Amz-Signature 부재",
+			mutate:     func(e *authRequest) { *e = presignedEnvelopeFrom(without(presignedQuery(), "X-Amz-Signature")) },
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "X-Amz-SignedHeaders 에 x-server-binding 미포함",
+			mutate: func(e *authRequest) {
+				q := presignedQuery()
+				q.Set("X-Amz-SignedHeaders", "host")
+				*e = presignedEnvelopeFrom(q)
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "X-Server-Binding 헤더 부재",
+			mutate: func(e *authRequest) {
+				*e = validPresignedEnvelope()
+				delete(e.Headers, "X-Server-Binding")
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "X-Amz-Date 부재",
+			mutate:     func(e *authRequest) { *e = presignedEnvelopeFrom(without(presignedQuery(), "X-Amz-Date")) },
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "X-Amz-Date 형식 불량",
+			mutate: func(e *authRequest) {
+				q := presignedQuery()
+				q.Set("X-Amz-Date", "not-a-date")
+				*e = presignedEnvelopeFrom(q)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "X-Amz-Expires 부재",
+			mutate:     func(e *authRequest) { *e = presignedEnvelopeFrom(without(presignedQuery(), "X-Amz-Expires")) },
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "X-Amz-Expires 형식 불량",
+			mutate: func(e *authRequest) {
+				q := presignedQuery()
+				q.Set("X-Amz-Expires", "abc")
+				*e = presignedEnvelopeFrom(q)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "X-Amz-Expires 0 이하",
+			mutate: func(e *authRequest) {
+				q := presignedQuery()
+				q.Set("X-Amz-Expires", "0")
+				*e = presignedEnvelopeFrom(q)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "X-Amz-Expires 상한 초과",
+			mutate: func(e *authRequest) {
+				q := presignedQuery()
+				// AWS presigned 최대 7일(604800s)을 넘긴다(오버플로/남용 방지 상한).
+				q.Set("X-Amz-Expires", "604801")
+				*e = presignedEnvelopeFrom(q)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "X-Amz-Expires 거대값(int64 초과)",
+			mutate: func(e *authRequest) {
+				q := presignedQuery()
+				// int64 를 넘겨 strconv.Atoi 가 ErrRange 를 내는 경로(곱셈 오버플로 방지 계약 회귀).
+				q.Set("X-Amz-Expires", "9999999999999999999")
+				*e = presignedEnvelopeFrom(q)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAuthenticator{}
+			env := validPresignedEnvelope()
+			tc.mutate(&env)
+
+			rec := doAuth(newAuthEngine(fake), mustJSON(t, env))
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body=%s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if fake.called {
+				t.Error("사전검증 실패인데 코어가 호출됨")
+			}
+		})
+	}
+}
+
+// without 는 쿼리에서 key 를 뺀 사본을 돌려준다(presigned 사전검증표에서 특정 파라미터 부재를
+// 재현하는 데 쓴다).
+func without(q url.Values, key string) url.Values {
+	q.Del(key)
+	return q
 }
 
 // TestAuthenticate_success 는 성공 시 200 과 발급 자격이 응답되고, 엔벨로프에서 SignedRequest

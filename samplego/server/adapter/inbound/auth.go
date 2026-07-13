@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,12 +25,39 @@ const (
 	// 일치하는지 코어에서 대조한다(혼동된 대리자 완화).
 	bindingHeader = "X-Server-Binding"
 
-	// amzDateHeader 는 SigV4 서명 시각을 싣는 헤더 이름이다. 신선도 판단의 근거(SignedAt)이며,
-	// 위변조를 막으려면 서명 범위에 포함돼야 한다.
+	// amzDateHeader 는 SigV4 서명 시각을 싣는 헤더 이름이다. 헤더 기반에서는 신선도 판단의
+	// 근거(SignedAt)이며, 위변조를 막으려면 서명 범위에 포함돼야 한다. presigned 에서는 같은
+	// 이름이 URL 쿼리 파라미터로 실린다(아래 presigned 쿼리 상수 참고).
 	amzDateHeader = "X-Amz-Date"
 
-	// amzDateFormat 은 X-Amz-Date 의 ISO8601 basic 형식이다(예: 20260708T120000Z).
+	// amzDateFormat 은 X-Amz-Date 의 ISO8601 basic 형식이다(예: 20260708T120000Z). 두 형태가
+	// 같은 형식을 쓴다.
 	amzDateFormat = "20060102T150405Z"
+
+	// presigned(pre-signed URL) 형태의 SigV4 정보는 Authorization 헤더가 아니라 URL 쿼리
+	// 파라미터로 실린다. X-Amz-Algorithm 존재로 형태를 판별하고, X-Amz-SignedHeaders 를 서명
+	// 범위로, X-Amz-Date + X-Amz-Expires 를 신선도 근거로, Credential/Signature 존재를 확인한다.
+	// Action 은 쿼리에서 뽑는다(헤더 기반은 폼 바디에서 뽑는 것과 대칭). 이 값들은 canonical
+	// 쿼리 문자열에 들어 서명 범위에 포함되므로 위변조 시 STS 가 서명 재검증에서 거절한다.
+	amzAlgorithmParam     = "X-Amz-Algorithm"
+	amzCredentialParam    = "X-Amz-Credential"
+	amzDateParam          = "X-Amz-Date"
+	amzExpiresParam       = "X-Amz-Expires"
+	amzSignedHeadersParam = "X-Amz-SignedHeaders"
+	amzSignatureParam     = "X-Amz-Signature"
+	queryActionKey        = "Action"
+
+	// MaxPresignExpirySeconds 는 받아들일 X-Amz-Expires 의 상한(초)이다. AWS 도 presigned URL
+	// 만료를 최대 7일로 두므로 이를 상한으로 삼는다. 서버는 어차피 자체 최대 age 와 교집합(min)을
+	// 취하므로 이보다 큰 만료는 의미가 없고, 상한이 없으면 거대한 값이 time.Duration(int64 ns) 곱셈
+	// 에서 오버플로할 수 있어 여기서 거른다.
+	//
+	// 상한 초과는 클램프가 아니라 거부한다. 이 저장소는 불일치를 조용히 고치기보다 명확히 거르는
+	// 편(config 검증과 같은 톤)이라 일관성을 지킨다. 클라이언트도 같은 상한(config 의
+	// MaxPresignExpiry)을 로컬에서 거르므로, 정상 클라이언트는 이 서버 거부에 도달하지 않는다.
+	// 두 값이 어긋나면 로컬 수락 -> 원격 거부가 재발하므로, 크로스모듈 e2e 테스트가 초 환산
+	// 동일성을 단언한다(그 대조를 위해 export 한다).
+	MaxPresignExpirySeconds = 7 * 24 * 60 * 60
 
 	// maxBodyBytes 는 수신 어댑터가 받는 JSON 요청 본문의 최대 바이트다(/auth 서명 엔벨로프,
 	// /verify 토큰 모두 작으므로 넉넉히 1 MiB). 넘으면 413 으로 거부한다. 상한이 없으면 거대한
@@ -59,9 +87,21 @@ type errorResponse struct {
 	Message string `json:"message"`
 }
 
+// extractedProof 는 두 증명 형태(header/presigned)에서 공통으로 뽑아 코어로 넘길 스칼라
+// 묶음이다. 형태 판별 후 형태별 추출기가 이 값을 채우면, 공통 코어 투입 경로가 형태를
+// 신경 쓰지 않고 하나로 흐른다(형태별 특수분기를 추출 계층에만 가둔다).
+type extractedProof struct {
+	form     domain.ProofForm
+	binding  string
+	signedAt time.Time
+	action   string
+	expiry   time.Duration // presigned 만 채운다(header 는 0)
+}
+
 // Authenticate 는 서명된 GetCallerIdentity 요청(JSON 엔벨로프)을 파싱해 인바운드 포트로 넘기고,
-// 결과를 HTTP 로 매핑한다. 도메인 호출 전에 엔벨로프 파싱과 서명 범위(SignedHeaders) 사전검증을
-// 먼저 하고, 통과한 값만 코어로 넘긴다.
+// 결과를 HTTP 로 매핑한다. 도메인 호출 전에 엔벨로프 파싱과 증명 형태 판별/사전검증을 먼저 하고,
+// 통과한 값만 공통으로 코어에 넘긴다. 형태 판별은 Authorization 헤더(헤더 기반) 대 X-Amz-Algorithm
+// 쿼리(presigned)로 가른다.
 func (h *Handler) Authenticate(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -79,66 +119,31 @@ func (h *Handler) Authenticate(c *gin.Context) {
 		return
 	}
 
-	// 보안 관련 헤더는 정확히 1개 값만 허용한다. 대소문자만 다른 중복 키(예: X-Amz-Date 와
-	// x-amz-date)는 서로 다른 JSON 키로 언마샬되어, 첫 값을 취하면 어느 값이 뽑힐지 맵 순회
-	// 순서에 따라 비결정적이 된다. STS 는 canonical 화 시 모든 값을 합치므로, 로컬 판단과
-	// 어긋나지 않도록 다중 값을 아예 거부한다.
-	authzVals := headerValues(req.Headers, authorizationHeader)
-	if len(authzVals) != 1 {
-		h.logger.InfoContext(ctx, "auth 요청 Authorization 헤더 값 개수 비정상", slog.Int("count", len(authzVals)))
-		writeError(c, http.StatusBadRequest, "invalid_signature", "Authorization 헤더가 없거나 값이 2개 이상임")
-		return
+	// 형태 판별 -> 형태별 추출기로 분기한다. 지원 형태는 헤더 기반(Authorization 헤더)과 presigned
+	// (URL 쿼리 서명) 둘뿐이므로, Authorization 헤더가 있으면 헤더 기반, 없으면 presigned 로 시도한다.
+	// presigned 도 아니면(X-Amz-Algorithm 쿼리 부재) extractPresignedForm 이 형태 판별 불가로 거부한다.
+	// 추출기는 실패 시 스스로 응답을 쓰고 false 를 돌려준다(호출부는 즉시 return).
+	var (
+		p  extractedProof
+		ok bool
+	)
+	if len(headerValues(req.Headers, authorizationHeader)) > 0 {
+		p, ok = h.extractHeaderForm(c, req, body)
+	} else {
+		p, ok = h.extractPresignedForm(c, req)
 	}
-
-	// SigV4 SignedHeaders 목록을 뽑는다. 서명 밖에서 주입된 헤더는 STS 가 서명 검증에서
-	// 무시하므로, 신선도/바인딩 근거 헤더가 이 목록 안에 있는지 확인해 위변조 우회를 막는다.
-	signed := signedHeaderSet(authzVals[0])
-	if len(signed) == 0 {
-		h.logger.InfoContext(ctx, "auth 요청 SignedHeaders 해석 불가")
-		writeError(c, http.StatusBadRequest, "invalid_signature", "Authorization 헤더의 SignedHeaders 를 해석할 수 없음")
-		return
-	}
-
-	// 신선도 근거(SignedAt)는 서명된 X-Amz-Date 에서만 얻는다. 서명 범위 밖 날짜는 위조로
-	// 신선도를 되살릴 수 있으므로 거부한다.
-	rawDate, count, ok := singleSignedValue(req.Headers, signed, amzDateHeader)
 	if !ok {
-		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 부재/다중/미서명", slog.Int("count", count))
-		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
 		return
-	}
-	signedAt, err := time.Parse(amzDateFormat, rawDate)
-	if err != nil {
-		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 파싱 실패", slog.Any("error", err))
-		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 형식이 올바르지 않음")
-		return
-	}
-
-	// 바인딩 헤더가 없거나(또는 다중이거나) 서명 범위 밖이면, 이 증명이 이 서버로 바인딩됐다고
-	// 볼 수 없다(혼동된 대리자). 값 대조(코어) 이전에 여기서 거부한다.
-	binding, count, ok := singleSignedValue(req.Headers, signed, bindingHeader)
-	if !ok {
-		h.logger.WarnContext(ctx, "바인딩 헤더가 없거나 다중이거나 서명 범위 밖", slog.Int("count", count))
-		writeError(c, http.StatusForbidden, "binding_not_signed", "서버 바인딩 헤더가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
-		return
-	}
-
-	// Action 은 위임 형태 검증(코어 3단계)용 추출값이다. 정확히 1개일 때만 채우고, 부재/중복
-	// (파라미터 오염)이면 빈 값으로 두어 코어가 invalid_shape 로 거르게 한다. 첫 값 묵시 채택을
-	// 없애, STS 가 실제로 해석하는 값과 로컬 판단이 어긋나지 않게 한다.
-	action := ""
-	if form, err := url.ParseQuery(string(body)); err == nil {
-		if vals := form["Action"]; len(vals) == 1 {
-			action = vals[0]
-		}
 	}
 
 	out, err := h.auth.Authenticate(ctx, domain.AuthenticateInput{
 		Request: domain.SignedRequest{
-			BindingValue: binding,
+			Form:         p.form,
+			BindingValue: p.binding,
 			Method:       req.Method,
-			Action:       action,
-			SignedAt:     signedAt,
+			Action:       p.action,
+			SignedAt:     p.signedAt,
+			Expiry:       p.expiry,
 			Original: domain.PreservedRequest{
 				Method: req.Method,
 				URL:    req.URL,
@@ -156,6 +161,168 @@ func (h *Handler) Authenticate(c *gin.Context) {
 		Token:     out.Credential.Token,
 		ExpiresAt: out.Credential.ExpiresAt.Format(time.RFC3339),
 	})
+}
+
+// extractHeaderForm 은 헤더 기반 서명(Authorization 헤더에 SignedHeaders)에서 신선도/바인딩
+// 근거를 뽑는다. 서명 밖에서 주입된 헤더는 STS 가 서명 검증에서 무시하므로, X-Amz-Date/바인딩
+// 헤더가 SignedHeaders 목록 안에 있는지 함께 확인해 위변조 우회를 막는다. 실패 시 응답을 쓰고
+// ok=false 를 돌려준다.
+func (h *Handler) extractHeaderForm(c *gin.Context, req authRequest, body []byte) (extractedProof, bool) {
+	ctx := c.Request.Context()
+
+	// 보안 관련 헤더는 정확히 1개 값만 허용한다. 대소문자만 다른 중복 키(예: X-Amz-Date 와
+	// x-amz-date)는 서로 다른 JSON 키로 언마샬되어, 첫 값을 취하면 어느 값이 뽑힐지 맵 순회
+	// 순서에 따라 비결정적이 된다. STS 는 canonical 화 시 모든 값을 합치므로, 로컬 판단과
+	// 어긋나지 않도록 다중 값을 아예 거부한다.
+	authzVals := headerValues(req.Headers, authorizationHeader)
+	if len(authzVals) != 1 {
+		h.logger.InfoContext(ctx, "auth 요청 Authorization 헤더 값 개수 비정상", slog.Int("count", len(authzVals)))
+		writeError(c, http.StatusBadRequest, "invalid_signature", "Authorization 헤더가 없거나 값이 2개 이상임")
+		return extractedProof{}, false
+	}
+
+	// SigV4 SignedHeaders 목록을 뽑는다. 서명 밖에서 주입된 헤더는 STS 가 서명 검증에서
+	// 무시하므로, 신선도/바인딩 근거 헤더가 이 목록 안에 있는지 확인해 위변조 우회를 막는다.
+	signed := signedHeaderSet(authzVals[0])
+	if len(signed) == 0 {
+		h.logger.InfoContext(ctx, "auth 요청 SignedHeaders 해석 불가")
+		writeError(c, http.StatusBadRequest, "invalid_signature", "Authorization 헤더의 SignedHeaders 를 해석할 수 없음")
+		return extractedProof{}, false
+	}
+
+	// 신선도 근거(SignedAt)는 서명된 X-Amz-Date 에서만 얻는다. 서명 범위 밖 날짜는 위조로
+	// 신선도를 되살릴 수 있으므로 거부한다.
+	rawDate, count, ok := singleSignedValue(req.Headers, signed, amzDateHeader)
+	if !ok {
+		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 부재/다중/미서명", slog.Int("count", count))
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
+		return extractedProof{}, false
+	}
+	signedAt, err := time.Parse(amzDateFormat, rawDate)
+	if err != nil {
+		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Date 파싱 실패", slog.Any("error", err))
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 형식이 올바르지 않음")
+		return extractedProof{}, false
+	}
+
+	// 바인딩 헤더가 없거나(또는 다중이거나) 서명 범위 밖이면, 이 증명이 이 서버로 바인딩됐다고
+	// 볼 수 없다(혼동된 대리자). 값 대조(코어) 이전에 여기서 거부한다.
+	binding, ok := h.signedBinding(c, req.Headers, signed)
+	if !ok {
+		return extractedProof{}, false
+	}
+
+	return extractedProof{
+		form:     domain.FormHeader,
+		binding:  binding,
+		signedAt: signedAt,
+		action:   actionFromForm(string(body)),
+	}, true
+}
+
+// extractPresignedForm 은 pre-signed URL 형태에서 신선도/만료/바인딩 근거를 URL 쿼리에서 뽑는다.
+// Authorization 헤더 대신 X-Amz-SignedHeaders 를 서명 범위로, X-Amz-Date + X-Amz-Expires 를
+// 신선도/만료 근거로, X-Amz-Algorithm/Credential/Signature 존재를 확인한다. 바인딩은 실제 헤더로
+// 존재하면서 동시에 X-Amz-SignedHeaders 목록에 있어야 통과한다(없거나 미서명이면 binding_not_signed).
+// 날짜/만료 자체는 canonical 쿼리에 실려 서명 범위에 들어가므로(위변조 시 STS 가 거절) SignedHeaders
+// 목록 포함까지는 요구하지 않는다. 실패 시 응답을 쓰고 ok=false 를 돌려준다.
+func (h *Handler) extractPresignedForm(c *gin.Context, req authRequest) (extractedProof, bool) {
+	ctx := c.Request.Context()
+
+	u, err := url.Parse(req.URL)
+	if err != nil {
+		h.logger.InfoContext(ctx, "auth 요청 presigned URL 파싱 실패", slog.Any("error", err))
+		writeError(c, http.StatusBadRequest, "invalid_signature", "presigned URL 을 해석할 수 없음")
+		return extractedProof{}, false
+	}
+	q := u.Query()
+
+	// 형태 게이트: presigned 는 URL 쿼리에 X-Amz-Algorithm 을 실는다. Authorization 헤더가 없는데
+	// 이마저 없으면 지원하는 두 형태 어디에도 해당하지 않으므로, 형태 판별 불가로 거부한다.
+	if !q.Has(amzAlgorithmParam) {
+		h.logger.InfoContext(ctx, "auth 요청 증명 형태 판별 불가")
+		writeError(c, http.StatusBadRequest, "invalid_signature", "증명 형태를 판별할 수 없음(Authorization 헤더도 presigned 쿼리도 없음)")
+		return extractedProof{}, false
+	}
+
+	// SigV4 쿼리 서명의 필수 파라미터가 각각 정확히 1개로 존재하는지 확인한다(파라미터 오염
+	// 방지). 값 자체의 유효성은 STS 가 서명 재검증에서 본다.
+	for _, name := range []string{amzAlgorithmParam, amzCredentialParam, amzSignatureParam} {
+		if len(q[name]) != 1 {
+			h.logger.InfoContext(ctx, "auth 요청 presigned 필수 쿼리 파라미터 부재/다중", slog.String("param", name), slog.Int("count", len(q[name])))
+			writeError(c, http.StatusBadRequest, "invalid_signature", "presigned SigV4 쿼리 파라미터가 없거나 값이 2개 이상임")
+			return extractedProof{}, false
+		}
+	}
+
+	// 서명 범위(SignedHeaders)는 X-Amz-SignedHeaders 쿼리에서 얻는다. 헤더 기반의 Authorization
+	// SignedHeaders 와 같은 세미콜론 목록이라 같은 헬퍼로 파싱한다.
+	rawSignedHeaders, ok := singleQueryValue(q, amzSignedHeadersParam)
+	if !ok {
+		h.logger.InfoContext(ctx, "auth 요청 X-Amz-SignedHeaders 부재/다중")
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-SignedHeaders 가 없거나 값이 2개 이상임")
+		return extractedProof{}, false
+	}
+	signed := parseSignedHeaderList(rawSignedHeaders)
+	if len(signed) == 0 {
+		h.logger.InfoContext(ctx, "auth 요청 X-Amz-SignedHeaders 해석 불가")
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-SignedHeaders 를 해석할 수 없음")
+		return extractedProof{}, false
+	}
+
+	// 신선도 근거(SignedAt)는 X-Amz-Date 쿼리에서 얻는다.
+	rawDate, ok := singleQueryValue(q, amzDateParam)
+	if !ok {
+		h.logger.InfoContext(ctx, "auth 요청 presigned X-Amz-Date 부재/다중")
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 가 없거나 값이 2개 이상임")
+		return extractedProof{}, false
+	}
+	signedAt, err := time.Parse(amzDateFormat, rawDate)
+	if err != nil {
+		h.logger.InfoContext(ctx, "auth 요청 presigned X-Amz-Date 파싱 실패", slog.Any("error", err))
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Date 형식이 올바르지 않음")
+		return extractedProof{}, false
+	}
+
+	// 만료 근거(Expiry)는 X-Amz-Expires 쿼리에서 얻는다(초 단위 양의 정수, 상한 이내). 서버는 이
+	// 값을 맹신하지 않고 자체 최대 age 와 교집합으로만 반영하지만(코어 4단계), 형식/부호/상한은
+	// 여기서 건다. 상한(MaxPresignExpirySeconds)은 초 단위를 time.Duration(ns) 으로 곱할 때의
+	// 오버플로도 함께 막는다.
+	rawExpires, ok := singleQueryValue(q, amzExpiresParam)
+	if !ok {
+		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Expires 부재/다중")
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Expires 가 없거나 값이 2개 이상임")
+		return extractedProof{}, false
+	}
+	expSecs, err := strconv.Atoi(rawExpires)
+	if err != nil || expSecs <= 0 || expSecs > MaxPresignExpirySeconds {
+		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Expires 형식/부호/상한 불량", slog.String("value", rawExpires))
+		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Expires 는 양의 정수(초)이고 상한 이내여야 함")
+		return extractedProof{}, false
+	}
+
+	// 바인딩 헤더가 실제 헤더로 존재하고 동시에 X-Amz-SignedHeaders 목록에 있어야 통과한다.
+	// presigned 에서 바인딩 값은 쿼리가 아니라 실제 HTTP 헤더로 실리므로, 서명 범위(SignedHeaders)
+	// 안에 없으면 전달 과정에서 값이 바뀌어도 서명이 깨지지 않아 혼동된 대리자 완화가 무력화된다.
+	binding, ok := h.signedBinding(c, req.Headers, signed)
+	if !ok {
+		return extractedProof{}, false
+	}
+
+	// Action 은 헤더 기반이 폼 바디에서 뽑는 것과 대칭으로 URL 쿼리에서 뽑는다. 정확히 1개일
+	// 때만 채우고, 부재/중복이면 빈 값으로 두어 코어가 invalid_shape 로 거르게 한다.
+	action := ""
+	if vals := q[queryActionKey]; len(vals) == 1 {
+		action = vals[0]
+	}
+
+	return extractedProof{
+		form:     domain.FormPresigned,
+		binding:  binding,
+		signedAt: signedAt,
+		action:   action,
+		expiry:   time.Duration(expSecs) * time.Second,
+	}, true
 }
 
 // writeAuthError 는 도메인/어댑터가 돌려준 에러를 HTTP 상태로 매핑해 응답한다. 로컬 거부
@@ -251,6 +418,44 @@ func singleSignedValue(h map[string][]string, signed map[string]bool, name strin
 	return vals[0], len(vals), true
 }
 
+// singleQueryValue 는 쿼리 파라미터 key 가 정확히 1개 값일 때 그 값을 돌려준다. 부재/다중이면
+// ok=false 다. presigned 쿼리 파라미터의 "정확히 1개" 검사(파라미터 오염 방지)에 쓴다.
+func singleQueryValue(q url.Values, key string) (string, bool) {
+	vals := q[key]
+	if len(vals) != 1 {
+		return "", false
+	}
+	return vals[0], true
+}
+
+// signedBinding 은 바인딩 헤더가 실제 헤더로 정확히 1개 존재하면서 SigV4 서명 범위(SignedHeaders)
+// 에 포함되는지 확인해 그 값을 돌려준다. 두 형태(header/presigned)가 공유하는 혼동된 대리자 검사로,
+// 서명 범위 밖 바인딩은 전달 과정에서 값이 바뀌어도 서명이 깨지지 않아 완화가 무력화되므로 거부한다.
+// 실패 시 스스로 응답(403 binding_not_signed)을 쓰고 ok=false 를 돌려준다.
+func (h *Handler) signedBinding(c *gin.Context, headers map[string][]string, signed map[string]bool) (string, bool) {
+	binding, count, ok := singleSignedValue(headers, signed, bindingHeader)
+	if !ok {
+		h.logger.WarnContext(c.Request.Context(), "바인딩 헤더가 없거나 다중이거나 서명 범위 밖", slog.Int("count", count))
+		writeError(c, http.StatusForbidden, "binding_not_signed", "서버 바인딩 헤더가 없거나 값이 2개 이상이거나 서명 범위에 포함되지 않음")
+		return "", false
+	}
+	return binding, true
+}
+
+// actionFromForm 은 POST 폼 바디에서 Action 파라미터를 뽑는다(헤더 기반 경로용). 정확히 1개일
+// 때만 채우고, 부재/중복(파라미터 오염)이면 빈 값을 돌려주어 코어가 invalid_shape 로 거르게 한다.
+// 첫 값 묵시 채택을 없애, STS 가 실제로 해석하는 값과 로컬 판단이 어긋나지 않게 한다.
+func actionFromForm(body string) string {
+	form, err := url.ParseQuery(body)
+	if err != nil {
+		return ""
+	}
+	if vals := form[queryActionKey]; len(vals) == 1 {
+		return vals[0]
+	}
+	return ""
+}
+
 // signedHeaderSet 은 SigV4 Authorization 헤더 값에서 SignedHeaders 구간을 찾아, 세미콜론으로
 // 구분된 헤더 이름들을 소문자 집합으로 돌려준다. SignedHeaders 를 찾지 못하거나 비면 nil 을
 // 돌려준다. Authorization 형식 예:
@@ -266,8 +471,15 @@ func signedHeaderSet(authorization string) map[string]bool {
 	if j := strings.IndexByte(rest, ','); j >= 0 {
 		rest = rest[:j]
 	}
+	return parseSignedHeaderList(rest)
+}
+
+// parseSignedHeaderList 는 세미콜론으로 구분된 SignedHeaders 목록(예: "host;x-amz-date;
+// x-server-binding")을 소문자 집합으로 돌려준다. 비면 nil 이다. 헤더 기반의 Authorization
+// SignedHeaders 구간과 presigned 의 X-Amz-SignedHeaders 쿼리가 같은 형식이라 함께 쓴다.
+func parseSignedHeaderList(list string) map[string]bool {
 	set := make(map[string]bool)
-	for _, name := range strings.Split(rest, ";") {
+	for _, name := range strings.Split(list, ";") {
 		if n := strings.ToLower(strings.TrimSpace(name)); n != "" {
 			set[n] = true
 		}

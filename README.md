@@ -242,7 +242,7 @@ C4Component
 - **전달 요청 검증(코어)**: 위임 전에, 어댑터가 추출해 제시한 메서드/바디/액션을 근거로 코어가 `GetCallerIdentity` 호출인지 판단해, 신원 조회가 아닌 다른 요청을 대신 내보내는 통로가 되지 않도록 합니다.
 - **STS 엔드포인트 허용 목록(신원 검증 포트/어댑터 경계)**: 위임 대상을 허용 목록의 진짜 엔드포인트로 고정합니다. "STS에 검증을 맡긴다"는 전제가 가짜 엔드포인트로 무너지지 않게 합니다.
 - **반환 ARN 검증(코어 + 정책/설정 포트)**: 정책/설정 포트가 준 허용 신원 목록과 대조해, 유효한 AWS 신원이라고 무조건 수용하지 않습니다(`인증 흐름`의 6번).
-- **요청 만료/최대 age(코어 + 시계 포트)**: 서버가 받아들일 최대 유효 구간을 강제합니다. 이는 클라이언트가 정하는 만료와는 다른 서버 측 값입니다. 서명 형태(헤더 기반 재전송 / pre-signed URL)에 따른 만료 차이는 `클라이언트 > 보안 고려사항`에서 다룹니다.
+- **요청 만료/최대 age(코어 + 시계 포트)**: 서버가 받아들일 최대 유효 구간을 강제합니다. 이는 클라이언트가 정하는 만료와는 다른 서버 측 값입니다. presigned 는 클라이언트가 `X-Amz-Expires`로 만료를 직접 지정하지만, 서버는 이 값을 맹신하지 않고 자체 최대 age 를 계속 강제합니다. 두 유효 구간은 모두 서명 시각(`X-Amz-Date`)에서 시작하므로, 실제 유효 구간은 둘의 교집합, 즉 `min(서버 최대 age, 클라이언트 만료)`입니다(코어의 신선도 판단이 `SignedAt` 기준으로 이 최소값을 적용). 그래서 클라이언트가 만료를 짧게 잡으면 그만큼 창이 더 좁아지고, 길게 잡아도 서버 최대 age 를 넘겨 유효해지지는 않습니다. 헤더 기반은 클라이언트 만료가 없어 서버 최대 age 만 적용됩니다. 서명 형태에 따른 만료 차이는 `클라이언트 > 보안 고려사항`에서 다룹니다.
 
 헥사고날 구성의 이점은 보안 관점에서 분명해집니다. 신뢰를 좌우하는 결정(완화책의 강제)이 모두 *코어* 또는 *포트 경계*에 모여 있어, 전송이나 자격 발급 같은 어댑터를 교체해도 그대로 보존됩니다.
 
@@ -257,7 +257,7 @@ C4Component
 1. **설정 로드**: 서버 주소, 서버 바인딩 헤더 값, STS 엔드포인트/리전, 증명 형태/만료 같은 값을 읽습니다(`설정`의 클라이언트/공통 항목). 이후 단계가 이 값들을 입력으로 씁니다.
 2. **자격증명 획득**: 표준 AWS SDK 자격증명 체인(환경 변수, EC2 인스턴스 프로파일, IRSA, Pod Identity 등)에서 자격증명을 얻습니다. 시크릿 키는 로컬에 두고 서명에만 씁니다. `GetCallerIdentity`는 별도 권한이 필요 없습니다(`요구 사항`의 워크로드 항목 참고).
 3. **증명 형태/만료 결정**: 서명을 어떤 형태로 만들지(헤더 기반 재전송 / pre-signed URL) 정하고, 그에 따른 만료를 확정합니다. 형태에 따라 만료를 거는 방식이 달라지므로(아래 `보안 고려사항`), 서명에 앞서 정해 둡니다.
-4. **서명 + 바인딩**: 정한 형태로 `GetCallerIdentity` 요청에 SigV4 서명을 만들고, *서버 바인딩 헤더를 서명 범위에 포함*합니다(혼동된 대리자 완화). 형태에 따라 만료를 부여합니다(재전송 완화). 시크릿 키는 서명을 만드는 데만 쓰이고 요청에는 담기지 않습니다.
+4. **서명 + 바인딩**: 정한 형태로 `GetCallerIdentity` 요청에 SigV4 서명을 만들고, *서버 바인딩 헤더를 서명 범위에 포함*합니다(혼동된 대리자 완화). 형태에 따라 만료를 부여합니다(재전송 완화). 헤더 기반은 `POST` 요청에 헤더 서명(`Authorization`)을 만들고, pre-signed URL 은 `GET` 요청을 쿼리 서명해 SigV4 정보를 URL 쿼리에 싣고 만료를 `X-Amz-Expires`로 지정합니다. pre-signed URL 에서도 바인딩 헤더는 쿼리가 아니라 실제 헤더로 두되 `X-Amz-SignedHeaders`에 포함시켜 서명 범위 안에 둡니다. 시크릿 키는 서명을 만드는 데만 쓰이고 요청에는 담기지 않습니다.
 5. **전송**: 서명된 요청만 대상 서버로 보냅니다(시크릿 키 미전송, `인증 흐름`의 2번). 이후 검증/위임/자격 발급은 `서버`가 맡습니다.
 
 | 단계       | 완화책(개요 > 보안 고려사항) | 인증 흐름 |
@@ -314,12 +314,19 @@ cd samplego/client && go run . --verify
 - `--binding-value`: 서명 범위에 넣을 서버 바인딩 헤더 값 (서버 `policy.binding_value`와 일치해야 함)
 - `--sts-endpoint`: SigV4 서명/위임 대상 STS 엔드포인트 (https, 기본 `https://sts.amazonaws.com`)
 - `--region`: SigV4 서명 리전 (기본 `us-east-1`)
-- `--form`: 증명 형태 (기본 `header`; 현재 `header` 만 지원, `presigned` 는 후속)
+- `--form`: 증명 형태 (기본 `header`; `header`(POST/헤더 서명) 또는 `presigned`(GET/쿼리 서명))
+- `--presign-expiry`: presigned 만료 (`X-Amz-Expires`, 기본 `5m`; `time.ParseDuration` 형식). `header` 형태에서는 무시됩니다.
 - `--timeout`: 실행 전체(자격증명 획득 + 서버 요청)의 최대 소요 시간 (기본 `30s`)
 - `--verify`: 발급 토큰을 `/verify`로 왕복 확인 (데모 편의)
 - `--static-creds`, `--static-access-key-id`, `--static-secret-key`: SDK 자격증명 체인 대신 static 값으로 서명 (실 AWS 없이 목 STS 를 구동하는 데모/오프라인용). `--static-session-token` 은 임시 자격증명일 때만 선택.
 
 `--region`과 `--sts-endpoint`는 서로 일치해야 합니다. 표준 AWS 파티션이라면 한쪽만 명시해도 나머지를 자동으로 파생하므로 둘 중 하나만 줘도 됩니다. 둘 다 명시하거나 둘 다 기본값이면 그대로 두고 로컬 정합성만 검사하며, 불일치는 로드 시점에 거부합니다.
+
+pre-signed URL 형태로 보내려면 `--form presigned`를 주고, 필요하면 `--presign-expiry`로 만료 구간을 좁힙니다(예: 서버 최대 age 보다 짧은 `1m`). 이 값은 서버 최대 age 와 교집합으로만 적용되므로 서버 창을 넘겨 늘어나지 않습니다(`서버 > 보안 고려사항` 참고).
+
+```
+cd samplego/client && go run . --form presigned --presign-expiry 1m --verify
+```
 
 #### 실 AWS 흐름
 
@@ -343,18 +350,29 @@ cd samplego/client && go test -tags e2e ./internal/e2e/...
 
 이 테스트는 실제 서버 라우터(`inbound.NewRouter`)와 실제 아웃바운드 어댑터를 그대로 조립해 `httptest`로 띄우고, 목 STS(`httptest` TLS)로 위임을 흉내냅니다. 클라이언트는 static dummy 자격증명으로 실제 SigV4 서명을 만들어 `/auth`로 보내고, 발급된 JWT 를 `/verify`로 왕복해 클레임까지 확인합니다. 서버 검증 로직을 복제하지 않고 실제 코드를 태우므로, 클라이언트가 만든 엔벨로프가 서버 와이어 계약과 실제로 맞물리는지 검증합니다.
 
+#### 개발/테스트
+
+두 모듈(서버/클라이언트)의 빌드/vet/gofmt/테스트(-race)와 위 크로스모듈 e2e 를 한 명령으로 돌리려면 루트의 `Makefile` 을 씁니다.
+
+```
+make check
+```
+
+`make check` 는 빌드 + `go vet` + gofmt 검사 + 테스트(`-race`, 그리고 `-tags e2e` 로 e2e 포함)를 두 모듈에 대해 순서대로 돌립니다. e2e 스위트에는 클라이언트와 서버가 각자 정의하는 presigned 만료 상한(pre-signed URL 의 `X-Amz-Expires` 최대치)이 서로 일치하는지 확인하는 가드가 들어 있어, 한쪽만 바뀌어 어긋나면 여기서 잡힙니다. 같은 스위트를 GitHub Actions(`.github/workflows/ci.yml`)가 push/PR 마다 강제합니다.
+
 #### 와이어 계약 요약
 
 두 컴포넌트가 주고받는 HTTP 계약은 다음과 같습니다(참고용).
 
-- `POST /auth` 요청 본문: `{method, url, headers(map[string][]string), body(base64 표준 인코딩)}`. 성공은 `200`과 `{token, expires_at(RFC3339)}`, 실패는 `4xx`(형식/신선도/바인딩/허용 신원 등) 또는 `5xx`(위임 upstream 오류 시 `502`)와 `{error, message}` 입니다.
+- `POST /auth` 요청 본문: `{method, url, headers(map[string][]string), body(base64 표준 인코딩)}`. 성공은 `200`과 `{token, expires_at(RFC3339)}`, 실패는 `4xx`(형식/신선도/바인딩/허용 신원 등) 또는 `5xx`(위임 upstream 오류 시 `502`)와 `{error, message}` 입니다. 두 증명 형태가 같은 본문 스키마로 수렴하되 형태별로 필드가 갈립니다.
+  - 헤더 기반(`header`): `method`는 `POST`, `url`은 STS 엔드포인트, `headers`에 `Authorization`(SigV4, `SignedHeaders`에 `x-amz-date`/`x-server-binding` 포함)/`X-Amz-Date`/`X-Server-Binding`/`Host`, `body`는 `Action=GetCallerIdentity&Version=2011-06-15`(base64). 서버는 `Authorization` 헤더로 형태를 판별합니다.
+  - pre-signed URL(`presigned`): `method`는 `GET`, `url`은 SigV4 정보(`X-Amz-Algorithm`/`Credential`/`Date`/`Expires`/`SignedHeaders`/`Signature`)와 `Action`/`Version`이 실린 쿼리, `body`는 빈 값, `headers`에는 서명 범위에 든 `X-Server-Binding`(실제 값)과 `Host`만 담습니다(`Authorization` 없음). 서버는 URL 쿼리의 `X-Amz-Algorithm` 존재로 형태를 판별하고, 바인딩은 `X-Amz-SignedHeaders`에 `x-server-binding`이 포함될 때만 통과시킵니다.
 - `POST /verify` 요청 본문: `{token}`. 성공은 `200`과 발급 토큰의 클레임, 실패는 `4xx`(토큰 검증 실패 `401`, 형식 오류 `400`, 본문 상한 초과 `413` 등) 또는 `5xx`(내부 오류 `500`)와 `{error, message}` 입니다.
 
 ## 제한 사항
 
 이 샘플은 설계와 흐름을 보이기 위한 것으로, 다음과 같은 범위/전제를 둡니다.
 
-- **헤더 기반 서명만 지원**: 현재 클라이언트/서버는 헤더 기반 SigV4 서명(`X-Amz-Date` 기준)만 지원합니다. 클라이언트가 만료를 직접 지정하는 pre-signed URL 형태(`X-Amz-Expires`)는 후속 작업이며, `--form=presigned`는 명시적으로 거부합니다(`클라이언트 > 보안 고려사항` 참고).
 - **커밋된 샘플 시크릿**: `config.yaml`의 `jwt.signing_secret`은 데모 편의를 위해 저장소에 그대로 커밋된 값입니다. 실 배포에서는 절대 이 값을 쓰지 말고 `JWT_SIGNING_SECRET` 환경변수나 별도 시크릿 관리로 교체하세요.
 - **리전/엔드포인트 로컬 검사 범위**: 클라이언트는 표준 AWS 파티션(global, 표준/gov 리전 등)에 대해서만 `--region`과 `--sts-endpoint`의 로컬 정합성을 검사하고 한쪽에서 다른 쪽을 파생합니다. cn 파티션, dualstack, FIPS dualstack 처럼 손수 목록에 없는 형태는 파생/검사를 건너뛰므로, 그런 대상은 `--sts-endpoint`와 `--region`을 함께 명시해야 합니다.
 - **그럴듯한 리전 오타는 못 거름**: 리전 형식 검사는 리전답지 않은 문자열만 거릅니다. 형식상 정상인 오타(예: `eu-wast-1`)는 로컬에서 통과하며, 실재 여부 판단은 서버 검증(STS 위임)에 위임됩니다.

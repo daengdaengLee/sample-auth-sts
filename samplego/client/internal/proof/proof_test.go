@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -214,4 +215,129 @@ func TestBuildProof_forwardable(t *testing.T) {
 	default:
 		t.Error("목 STS 가 요청을 받지 못함")
 	}
+}
+
+// presignInput 은 결정적 presigned 서명을 위한 기준 입력을 만든다(만료 90s 지정).
+func presignInput() Input {
+	in := testInput()
+	in.Expiry = 90 * time.Second
+	return in
+}
+
+// TestBuildPresignedProof_envelopeShape 는 presigned 엔벨로프가 서버 와이어 계약과 맞는지
+// 확인한다: method=GET, url 쿼리에 SigV4 정보(Algorithm/Credential/Date/Expires/SignedHeaders/
+// Signature)와 Action/Version 이 실리고, body 는 빈 값, 헤더에는 X-Server-Binding 과 Host 만 있다.
+func TestBuildPresignedProof_envelopeShape(t *testing.T) {
+	in := presignInput()
+	env, err := BuildPresignedProof(context.Background(), in)
+	if err != nil {
+		t.Fatalf("BuildPresignedProof 실패: %v", err)
+	}
+
+	if env.Method != http.MethodGet {
+		t.Errorf("Method = %q, want GET", env.Method)
+	}
+	if env.Body != "" {
+		t.Errorf("Body = %q, want 빈 값", env.Body)
+	}
+
+	u, err := url.Parse(env.URL)
+	if err != nil {
+		t.Fatalf("URL 파싱 실패(%q): %v", env.URL, err)
+	}
+	q := u.Query()
+	for _, name := range []string{"X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires", "X-Amz-SignedHeaders", "X-Amz-Signature", "Action", "Version"} {
+		if len(q[name]) != 1 {
+			t.Errorf("쿼리 %s 값 개수 = %d, want 1 (url=%s)", name, len(q[name]), env.URL)
+		}
+	}
+	if got := q.Get("Action"); got != "GetCallerIdentity" {
+		t.Errorf("Action = %q, want GetCallerIdentity", got)
+	}
+	// X-Amz-Expires 는 입력 만료의 초 단위여야 한다.
+	if got := q.Get("X-Amz-Expires"); got != "90" {
+		t.Errorf("X-Amz-Expires = %q, want 90", got)
+	}
+	// X-Amz-Date 는 서명 시각에서 온 ISO8601 basic 이어야 한다.
+	const amzDateFormat = "20060102T150405Z"
+	parsed, err := time.Parse(amzDateFormat, q.Get("X-Amz-Date"))
+	if err != nil {
+		t.Fatalf("X-Amz-Date 형식 파싱 실패(%q): %v", q.Get("X-Amz-Date"), err)
+	}
+	if !parsed.Equal(in.SignedAt) {
+		t.Errorf("X-Amz-Date = %v, want %v", parsed, in.SignedAt)
+	}
+
+	// 보안 관련 헤더는 정확히 1개 값이어야 한다. presigned 는 인증 정보를 쿼리에 싣고, 헤더로는
+	// 서명 범위에 든 X-Server-Binding 과 Host 만 보낸다(Authorization 헤더는 없어야 한다).
+	for _, name := range []string{"X-Server-Binding", "Host"} {
+		if got := len(env.Headers[name]); got != 1 {
+			t.Errorf("%s 헤더 값 개수 = %d, want 1", name, got)
+		}
+	}
+	if got := len(env.Headers["Authorization"]); got != 0 {
+		t.Errorf("presigned 인데 Authorization 헤더가 있음(개수=%d)", got)
+	}
+	if got := env.Headers["X-Server-Binding"][0]; got != in.BindingValue {
+		t.Errorf("X-Server-Binding = %q, want %q", got, in.BindingValue)
+	}
+}
+
+// TestBuildPresignedProof_bindingSigned 는 서버 바인딩 헤더가 X-Amz-SignedHeaders(서명 범위)
+// 안에 드는지 확인한다. 서명 범위 밖이면 전달 과정에서 값이 바뀌어도 서명이 깨지지 않아 혼동된
+// 대리자 완화가 무력화되므로, 반드시 host 와 함께 서명 범위에 있어야 한다.
+func TestBuildPresignedProof_bindingSigned(t *testing.T) {
+	env, err := BuildPresignedProof(context.Background(), presignInput())
+	if err != nil {
+		t.Fatalf("BuildPresignedProof 실패: %v", err)
+	}
+
+	u, err := url.Parse(env.URL)
+	if err != nil {
+		t.Fatalf("URL 파싱 실패: %v", err)
+	}
+	signed := parseSignedHeaderList(u.Query().Get("X-Amz-SignedHeaders"))
+	for _, want := range []string{"host", "x-server-binding"} {
+		if !signed[want] {
+			t.Errorf("X-Amz-SignedHeaders 에 %q 가 없음: %q", want, u.Query().Get("X-Amz-SignedHeaders"))
+		}
+	}
+}
+
+// TestBuildPresignedProof_sessionTokenHoisted 는 임시 자격증명(세션 토큰 포함)일 때 세션 토큰이
+// X-Amz-Security-Token 쿼리 파라미터로 실리는지 확인한다(presigned 는 헤더가 아니라 쿼리로
+// hoisting; 누락 시 STS 가 거절).
+func TestBuildPresignedProof_sessionTokenHoisted(t *testing.T) {
+	in := presignInput()
+	in.Credentials.SessionToken = "session-token-example"
+
+	env, err := BuildPresignedProof(context.Background(), in)
+	if err != nil {
+		t.Fatalf("BuildPresignedProof 실패: %v", err)
+	}
+
+	u, err := url.Parse(env.URL)
+	if err != nil {
+		t.Fatalf("URL 파싱 실패: %v", err)
+	}
+	if got := u.Query().Get("X-Amz-Security-Token"); got != in.Credentials.SessionToken {
+		t.Errorf("X-Amz-Security-Token(쿼리) = %q, want %q", got, in.Credentials.SessionToken)
+	}
+	// 세션 토큰은 헤더가 아니라 쿼리로 실려야 한다.
+	if got := len(env.Headers["X-Amz-Security-Token"]); got != 0 {
+		t.Errorf("presigned 인데 X-Amz-Security-Token 이 헤더로 실림(개수=%d)", got)
+	}
+}
+
+// parseSignedHeaderList 는 세미콜론으로 구분된 SignedHeaders 목록을 소문자 집합으로 뽑는다
+// (서버 수신 어댑터와 같은 방식의 테스트용 사본). presigned 는 X-Amz-SignedHeaders 쿼리에 이
+// 형식으로 서명 범위를 싣는다.
+func parseSignedHeaderList(list string) map[string]bool {
+	set := make(map[string]bool)
+	for _, name := range strings.Split(list, ";") {
+		if n := strings.ToLower(strings.TrimSpace(name)); n != "" {
+			set[n] = true
+		}
+	}
+	return set
 }

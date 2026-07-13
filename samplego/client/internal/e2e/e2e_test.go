@@ -32,6 +32,7 @@ import (
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/sts"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
 
+	clientconfig "github.com/daengdaenglee/sample-auth-sts/samplego/client/internal/config"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/client/internal/proof"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/client/internal/transport"
 )
@@ -43,6 +44,17 @@ const (
 	testIssuer  = "https://server.example"
 	testAud     = "https://server.example/clients"
 )
+
+// TestPresignExpiryBoundsAgree 는 클라이언트와 서버의 presigned 만료 상한이 같은 값인지 확인한다.
+// 두 상수는 별도 모듈이라 공유할 수 없어 각자 중복 정의되는데, 어긋나면 클라이언트가 로컬에서
+// 통과시킨 만료를 서버가 거부하는(로컬 수락 -> 원격 거부) 안티패턴이 재발한다. 크로스모듈 계약을
+// 검증하는 이 e2e 테스트가 초 환산 동일성을 단언해 그 divergence 를 부팅 없이 회귀로 잡는다.
+func TestPresignExpiryBoundsAgree(t *testing.T) {
+	clientSecs := int64(clientconfig.MaxPresignExpiry / time.Second)
+	if clientSecs != int64(inbound.MaxPresignExpirySeconds) {
+		t.Fatalf("presigned 만료 상한 불일치: 클라이언트 %ds, 서버 %ds (두 상수를 같은 값으로 맞춰야 함)", clientSecs, inbound.MaxPresignExpirySeconds)
+	}
+}
 
 // stsResponseXML 은 목 STS 가 돌려줄 GetCallerIdentity 성공 응답이다. ARN 은 서버 허용 목록과
 // 일치시킨다.
@@ -184,6 +196,78 @@ func TestClientEndToEnd(t *testing.T) {
 	}
 	if claims.Account != "123456789012" {
 		t.Errorf("verify account = %q, want 123456789012", claims.Account)
+	}
+}
+
+// TestClientEndToEnd_presigned 는 presigned 형태(GET 쿼리 서명)로도 인증 왕복을 완주하는지
+// 확인한다. 클라이언트가 BuildPresignedProof 로 서명하고, 실 라우터가 쿼리 기반 형태를 추출/검증해
+// 자격을 발급하며, 목 STS 가 GET 위임과 서명 범위의 바인딩 헤더를 받는지 본다(헤더 기반과 공존).
+func TestClientEndToEnd_presigned(t *testing.T) {
+	type captured struct {
+		method  string
+		binding string
+	}
+	gotSTS := make(chan captured, 1)
+	stsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSTS <- captured{method: r.Method, binding: r.Header.Get("X-Server-Binding")}
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = io.WriteString(w, stsResponseXML)
+	}))
+	defer stsSrv.Close()
+
+	v := buildServerConfig(stsSrv.URL)
+	router := assembleRouter(t, v, stsSrv.Client())
+	appSrv := httptest.NewServer(router)
+	defer appSrv.Close()
+
+	// 클라이언트: presigned 형태로 서명한다(만료를 서버 max-age(5m)보다 짧게 잡아 창을 좁힌다).
+	env, err := proof.BuildPresignedProof(context.Background(), proof.Input{
+		Credentials:  aws.Credentials{AccessKeyID: "AKIDEXAMPLE", SecretAccessKey: "secretexamplekey"},
+		Endpoint:     stsSrv.URL,
+		Region:       "us-east-1",
+		BindingValue: testBinding,
+		SignedAt:     time.Now(),
+		Expiry:       2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("BuildPresignedProof 실패: %v", err)
+	}
+	if env.Method != http.MethodGet {
+		t.Fatalf("presigned 엔벨로프 메서드 = %q, want GET", env.Method)
+	}
+
+	client := transport.New(appSrv.URL, nil)
+
+	// /auth: 200 과 발급 JWT 를 받는다.
+	authResult, err := client.PostAuth(context.Background(), env)
+	if err != nil {
+		t.Fatalf("PostAuth 실패: %v", err)
+	}
+	if parts := strings.Split(authResult.Token, "."); len(parts) != 3 {
+		t.Fatalf("발급 토큰이 JWT(3 세그먼트) 형태가 아님: %q", authResult.Token)
+	}
+
+	// 위임이 GET 으로 일어났고 바인딩 헤더가 그대로 전달됐는지 확인한다.
+	select {
+	case c := <-gotSTS:
+		if c.method != http.MethodGet {
+			t.Errorf("STS 로 위임된 메서드 = %q, want GET", c.method)
+		}
+		if c.binding != testBinding {
+			t.Errorf("STS 로 위임된 X-Server-Binding = %q", c.binding)
+		}
+	default:
+		t.Error("목 STS 가 요청을 받지 못함(위임이 일어나지 않음)")
+	}
+
+	// 발급 토큰의 클레임이 서버 설정에서 온 값인지 확인하고, /verify 로 왕복한다.
+	assertClaim(t, authResult.Token, testIssuer, testARN, testAud)
+	claims, err := client.PostVerify(context.Background(), authResult.Token)
+	if err != nil {
+		t.Fatalf("PostVerify 실패: %v", err)
+	}
+	if claims.Subject != testARN {
+		t.Errorf("verify sub = %q, want %q", claims.Subject, testARN)
 	}
 }
 

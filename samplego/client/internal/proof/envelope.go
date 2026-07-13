@@ -5,6 +5,25 @@ import (
 	"net/http"
 )
 
+// presignedEnvelope 는 pre-signed URL 서명 결과를 엔벨로프로 직렬화한다. presigned 는 SigV4
+// 정보(Algorithm/Credential/Date/Expires/SignedHeaders/Signature)와 Action/Version 이 모두 URL
+// 쿼리에 실리므로, method 는 GET, url 은 쿼리를 포함한 서명된 URL, body 는 빈 값이다. 헤더로는
+// 서명 범위에 든 X-Server-Binding(실제 값)과 Host(서명에 쓴 값)만 싣는다. 바인딩은 쿼리가 아니라
+// 실제 헤더로 보내되 X-Amz-SignedHeaders 에 포함돼 있어야 하며(혼동된 대리자 완화), Host 는 서버
+// STS 어댑터가 http.Request.Host 로 되옮겨 서명을 보존한다. body 는 base64 표준 인코딩 규약을
+// 지켜 빈 문자열로 둔다(서버가 base64.StdEncoding 으로 디코드하면 빈 바이트).
+func presignedEnvelope(signedURI, host, binding string) Envelope {
+	return Envelope{
+		Method: http.MethodGet,
+		URL:    signedURI,
+		Headers: map[string][]string{
+			bindingHeader: {binding},
+			"Host":        {host},
+		},
+		Body: "",
+	}
+}
+
 // Envelope 는 클라이언트가 /auth 로 보내는 JSON 엔벨로프다. 서버 수신 어댑터의 authRequest
 // (samplego/server/adapter/inbound/auth.go 의 authRequest)와 바이트 단위로 호환되도록 필드명/
 // 타입/태그를 그대로 맞춘다. Body 는 서명 대상 바이트를 정확히 보존하려고 base64 표준 인코딩
