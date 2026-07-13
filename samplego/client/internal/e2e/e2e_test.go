@@ -32,6 +32,7 @@ import (
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/adapter/outbound/sts"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/server/domain"
 
+	clientconfig "github.com/daengdaenglee/sample-auth-sts/samplego/client/internal/config"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/client/internal/proof"
 	"github.com/daengdaenglee/sample-auth-sts/samplego/client/internal/transport"
 )
@@ -43,6 +44,17 @@ const (
 	testIssuer  = "https://server.example"
 	testAud     = "https://server.example/clients"
 )
+
+// TestPresignExpiryBoundsAgree 는 클라이언트와 서버의 presigned 만료 상한이 같은 값인지 확인한다.
+// 두 상수는 별도 모듈이라 공유할 수 없어 각자 중복 정의되는데, 어긋나면 클라이언트가 로컬에서
+// 통과시킨 만료를 서버가 거부하는(로컬 수락 -> 원격 거부) 안티패턴이 재발한다. 크로스모듈 계약을
+// 검증하는 이 e2e 테스트가 초 환산 동일성을 단언해 그 divergence 를 부팅 없이 회귀로 잡는다.
+func TestPresignExpiryBoundsAgree(t *testing.T) {
+	clientSecs := int64(clientconfig.MaxPresignExpiry / time.Second)
+	if clientSecs != int64(inbound.MaxPresignExpirySeconds) {
+		t.Fatalf("presigned 만료 상한 불일치: 클라이언트 %ds, 서버 %ds (두 상수를 같은 값으로 맞춰야 함)", clientSecs, inbound.MaxPresignExpirySeconds)
+	}
+}
 
 // stsResponseXML 은 목 STS 가 돌려줄 GetCallerIdentity 성공 응답이다. ARN 은 서버 허용 목록과
 // 일치시킨다.

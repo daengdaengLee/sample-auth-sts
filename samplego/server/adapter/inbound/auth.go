@@ -47,15 +47,17 @@ const (
 	amzSignatureParam     = "X-Amz-Signature"
 	queryActionKey        = "Action"
 
-	// maxPresignExpirySeconds 는 받아들일 X-Amz-Expires 의 상한(초)이다. AWS 도 presigned URL
+	// MaxPresignExpirySeconds 는 받아들일 X-Amz-Expires 의 상한(초)이다. AWS 도 presigned URL
 	// 만료를 최대 7일로 두므로 이를 상한으로 삼는다. 서버는 어차피 자체 최대 age 와 교집합(min)을
 	// 취하므로 이보다 큰 만료는 의미가 없고, 상한이 없으면 거대한 값이 time.Duration(int64 ns) 곱셈
 	// 에서 오버플로할 수 있어 여기서 거른다.
 	//
 	// 상한 초과는 클램프가 아니라 거부한다. 이 저장소는 불일치를 조용히 고치기보다 명확히 거르는
 	// 편(config 검증과 같은 톤)이라 일관성을 지킨다. 클라이언트도 같은 상한(config 의
-	// maxPresignExpiry)을 로컬에서 거르므로, 정상 클라이언트는 이 서버 거부에 도달하지 않는다.
-	maxPresignExpirySeconds = 7 * 24 * 60 * 60
+	// MaxPresignExpiry)을 로컬에서 거르므로, 정상 클라이언트는 이 서버 거부에 도달하지 않는다.
+	// 두 값이 어긋나면 로컬 수락 -> 원격 거부가 재발하므로, 크로스모듈 e2e 테스트가 초 환산
+	// 동일성을 단언한다(그 대조를 위해 export 한다).
+	MaxPresignExpirySeconds = 7 * 24 * 60 * 60
 
 	// maxBodyBytes 는 수신 어댑터가 받는 JSON 요청 본문의 최대 바이트다(/auth 서명 엔벨로프,
 	// /verify 토큰 모두 작으므로 넉넉히 1 MiB). 넘으면 413 으로 거부한다. 상한이 없으면 거대한
@@ -284,7 +286,7 @@ func (h *Handler) extractPresignedForm(c *gin.Context, req authRequest) (extract
 
 	// 만료 근거(Expiry)는 X-Amz-Expires 쿼리에서 얻는다(초 단위 양의 정수, 상한 이내). 서버는 이
 	// 값을 맹신하지 않고 자체 최대 age 와 교집합으로만 반영하지만(코어 4단계), 형식/부호/상한은
-	// 여기서 건다. 상한(maxPresignExpirySeconds)은 초 단위를 time.Duration(ns) 으로 곱할 때의
+	// 여기서 건다. 상한(MaxPresignExpirySeconds)은 초 단위를 time.Duration(ns) 으로 곱할 때의
 	// 오버플로도 함께 막는다.
 	rawExpires, ok := singleQueryValue(q, amzExpiresParam)
 	if !ok {
@@ -293,7 +295,7 @@ func (h *Handler) extractPresignedForm(c *gin.Context, req authRequest) (extract
 		return extractedProof{}, false
 	}
 	expSecs, err := strconv.Atoi(rawExpires)
-	if err != nil || expSecs <= 0 || expSecs > maxPresignExpirySeconds {
+	if err != nil || expSecs <= 0 || expSecs > MaxPresignExpirySeconds {
 		h.logger.InfoContext(ctx, "auth 요청 X-Amz-Expires 형식/부호/상한 불량", slog.String("value", rawExpires))
 		writeError(c, http.StatusBadRequest, "invalid_signature", "X-Amz-Expires 는 양의 정수(초)이고 상한 이내여야 함")
 		return extractedProof{}, false

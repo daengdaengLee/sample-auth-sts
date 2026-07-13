@@ -170,6 +170,31 @@ func TestAuthenticate_presignedSuccess(t *testing.T) {
 	}
 }
 
+// TestAuthenticate_presignedExpiryBoundary 는 정확히 상한(MaxPresignExpirySeconds)인 X-Amz-Expires
+// 가 수락되어 코어로 넘어가는지 확인한다. 상한 검사가 실수로 > 대신 >= 가 되는 off-by-one 회귀가
+// 나면(경계값 거부) 이 테스트가 실패한다. 초과(604801)/거대값 거부는 preValidation 표가 덮는다.
+func TestAuthenticate_presignedExpiryBoundary(t *testing.T) {
+	fake := &fakeAuthenticator{out: domain.AuthenticateOutput{
+		Credential: domain.Credential{Token: "t", ExpiresAt: time.Unix(0, 0)},
+	}}
+
+	q := presignedQuery()
+	q.Set("X-Amz-Expires", fmt.Sprintf("%d", MaxPresignExpirySeconds))
+	env := presignedEnvelopeFrom(q)
+
+	rec := doAuth(newAuthEngine(fake), mustJSON(t, env))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (경계값 상한은 수락되어야 함, body=%s)", rec.Code, rec.Body.String())
+	}
+	if !fake.called {
+		t.Fatal("경계값 상한인데 코어가 호출되지 않음")
+	}
+	if got, want := fake.gotIn.Request.Expiry, time.Duration(MaxPresignExpirySeconds)*time.Second; got != want {
+		t.Errorf("Expiry = %v, want %v", got, want)
+	}
+}
+
 // TestAuthenticate_presignedPreValidation 은 presigned 사전검증 실패가 올바른 상태로 매핑되고,
 // 코어를 호출하지 않는지 표로 확인한다. 쿼리는 presignedQuery 를 기준으로 필요한 것만 바꾼다.
 func TestAuthenticate_presignedPreValidation(t *testing.T) {
