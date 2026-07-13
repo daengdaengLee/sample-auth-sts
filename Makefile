@@ -6,9 +6,6 @@
 SERVER := samplego/server
 CLIENT := samplego/client
 
-# issuer.go 는 이전부터 gofmt 지적이 있는 무관 파일이라 gofmt 게이트에서 예외로 둔다(이번 범위 밖).
-IGNORED_FMT := adapter/outbound/issuer/issuer.go
-
 .PHONY: check build vet fmt-check test test-server test-client
 
 # check 는 기본 종합 타깃이다. CI 와 동일한 스위트를 순서대로 돈다.
@@ -24,9 +21,9 @@ vet:
 	cd $(SERVER) && go vet ./...
 	cd $(CLIENT) && go vet ./...
 
-# fmt-check 는 gofmt 미정렬 파일이 있으면 실패한다. 서버는 기존 무관 파일(issuer.go)만 관용한다.
+# fmt-check 는 gofmt 미정렬 파일이 있으면 실패한다.
 fmt-check:
-	@out=$$(cd $(SERVER) && gofmt -l . | grep -v '^$(IGNORED_FMT)$$' || true); \
+	@out=$$(cd $(SERVER) && gofmt -l .); \
 	if [ -n "$$out" ]; then echo "gofmt 필요(server):"; echo "$$out"; exit 1; fi
 	@out=$$(cd $(CLIENT) && gofmt -l .); \
 	if [ -n "$$out" ]; then echo "gofmt 필요(client):"; echo "$$out"; exit 1; fi

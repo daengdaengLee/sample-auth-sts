@@ -1,11 +1,19 @@
 name: CI
 
-# push/PR 마다 두 모듈(server/client)의 빌드/vet/gofmt/테스트(+race)와 클라이언트 크로스모듈
+# push 마다 두 모듈(server/client)의 빌드/vet/gofmt/테스트(+race)와 클라이언트 크로스모듈
 # e2e(-tags e2e)를 자동 실행한다. e2e 안에 presigned 만료 상한의 클라이언트/서버 일치 가드
 # (TestPresignExpiryBoundsAgree)가 있어, 두 상수가 어긋나면 여기서 잡힌다.
+#
+# 트리거는 push 만 둔다(모든 브랜치). pull_request 를 함께 두면 같은 저장소 브랜치 PR 이 두
+# 이벤트로 중복 실행되므로 뺐다. 대신 기능 브랜치 push 도 매번 커버된다. 포크에서 온 PR 은 base
+# 저장소 push 이벤트가 없어 CI 가 돌지 않는다(개인 샘플 저장소라 감수).
 on:
   push:
-  pull_request:
+
+# 같은 ref 에 연속 push 하면 이전(무의미한) 실행을 취소해 러너를 아낀다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   server:
@@ -15,17 +23,18 @@ jobs:
         working-directory: samplego/server
     steps:
       - uses: actions/checkout@v4
-      # go 1.26.4 는 최신이라 정확 버전 고정 대신 stable 기준으로 두고, go.mod 의 go 지시가
-      # 필요한 툴체인을 자동 다운로드하도록 GOTOOLCHAIN 자동 전환에 맡긴다.
+      # go.mod 의 go 버전을 그대로 설치한다(정확 버전, setup 단계에서 명확히 성공/실패).
+      # 캐시는 모듈이 중첩돼 루트 go.sum 이 없으므로 이 모듈 go.sum 을 명시해야 실제로 걸린다.
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version-file: samplego/server/go.mod
+          cache-dependency-path: samplego/server/go.sum
       - run: go build ./...
       - run: go vet ./...
-      # gofmt 게이트: 기존 무관 파일(issuer.go)만 관용하고, 그 외 미정렬 파일이 있으면 실패한다.
+      # gofmt 게이트: 미정렬 파일이 있으면 실패한다.
       - name: gofmt
         run: |
-          out=$(gofmt -l . | grep -v '^adapter/outbound/issuer/issuer.go$' || true)
+          out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "gofmt 필요:"; echo "$out"; exit 1; fi
       - run: go test -race ./...
 
@@ -38,7 +47,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version-file: samplego/client/go.mod
+          cache-dependency-path: samplego/client/go.sum
       - run: go build ./...
       - run: go vet ./...
       - name: gofmt
