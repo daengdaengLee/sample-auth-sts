@@ -38,6 +38,13 @@ const (
 	defaultPresignExpiry = "5m"
 )
 
+// maxPresignExpiry 는 presigned 만료(--presign-expiry)의 상한이다. 서버 수신 어댑터의
+// maxPresignExpirySeconds(604800s, AWS presigned 최대 7일)와 같은 값으로, 서버가 상한 초과
+// X-Amz-Expires 를 거부하므로 클라이언트도 로컬에서 먼저 명확히 거른다(로컬 수락 -> 원격 거부
+// 방지). 두 모듈이 분리돼 상수를 공유할 수 없어 값이 중복되는데, 이는 기본값을 서버 config.yaml
+// 과 정렬해 양쪽에 두는 것과 같은 톤이다.
+const maxPresignExpiry = 7 * 24 * time.Hour
+
 // Config 는 클라이언트가 증명을 만들어 보내는 데 필요한 설정 묶음이다. 기본값은 서버
 // config.yaml 과 정렬해, 로컬 데모가 추가 설정 없이 바로 통과하도록 맞춘다.
 type Config struct {
@@ -241,6 +248,11 @@ func (c Config) validate() error {
 		// 유효 구간이 없어져 서버/STS 가 불투명하게 거부하므로, 로컬에서 미리 명확히 거른다.
 		if c.PresignExpiry <= 0 || c.PresignExpiry%time.Second != 0 {
 			return fmt.Errorf("presign-expiry 는 양의 초 단위여야 함(현재 %v): X-Amz-Expires 는 초 단위 정수라 1초 미만/소수 초는 잘린다", c.PresignExpiry)
+		}
+		// 상한도 서버와 맞춰 로컬에서 거른다. 서버가 상한 초과를 거부하므로(그리고 서버 max-age
+		// 와의 교집합상 이보다 큰 만료는 어차피 무의미), 로컬 수락 후 원격 거부로 이어지지 않게 한다.
+		if c.PresignExpiry > maxPresignExpiry {
+			return fmt.Errorf("presign-expiry 는 상한(%v) 이내여야 함(현재 %v): 서버가 상한 초과 X-Amz-Expires 를 거부한다", maxPresignExpiry, c.PresignExpiry)
 		}
 	default:
 		return fmt.Errorf("form 값이 올바르지 않음(%q): header/presigned 만 지원", c.Form)
