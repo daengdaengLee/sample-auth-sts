@@ -257,6 +257,16 @@ func TestAuthenticate_presignedPreValidation(t *testing.T) {
 			},
 			wantStatus: http.StatusBadRequest,
 		},
+		{
+			name: "X-Amz-Expires 거대값(int64 초과)",
+			mutate: func(e *authRequest) {
+				q := presignedQuery()
+				// int64 를 넘겨 strconv.Atoi 가 ErrRange 를 내는 경로(곱셈 오버플로 방지 계약 회귀).
+				q.Set("X-Amz-Expires", "9999999999999999999")
+				*e = presignedEnvelopeFrom(q)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
 	}
 
 	for _, tc := range cases {

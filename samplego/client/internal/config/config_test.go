@@ -280,6 +280,14 @@ func TestParse_presignExpiry(t *testing.T) {
 	if _, err := parse("client", []string{"--form", "presigned", "--presign-expiry", "1500ms"}, noEnv, io.Discard); err == nil {
 		t.Error("presigned + 소수 초 만료인데 에러가 없음(초 단위로 잘림)")
 	}
+	// 상한(7일) 초과는 서버가 거부하므로 로컬에서 미리 거른다(200h = 7일 초과).
+	if _, err := parse("client", []string{"--form", "presigned", "--presign-expiry", "200h"}, noEnv, io.Discard); err == nil {
+		t.Error("presigned + 상한 초과 만료인데 에러가 없음(200h > 7일)")
+	}
+	// 상한 경계(정확히 7일)는 통과해야 한다.
+	if _, err := parse("client", []string{"--form", "presigned", "--presign-expiry", "168h"}, noEnv, io.Discard); err != nil {
+		t.Errorf("presigned + 정확히 7일(168h) 만료인데 거부됨: %v", err)
+	}
 
 	// header 형태는 만료가 무의미하므로 0 이하/소수 초여도 통과해야 한다(형태별 처리).
 	if _, err := parse("client", []string{"--form", "header", "--presign-expiry", "0s"}, noEnv, io.Discard); err != nil {
