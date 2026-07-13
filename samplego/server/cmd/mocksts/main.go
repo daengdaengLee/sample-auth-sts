@@ -125,7 +125,8 @@ type stsResult struct {
 // stsResponse 는 GetCallerIdentity 성공 응답(XML)이다. encoding/xml 로 마샬해 값에 XML
 // 메타문자(&/</>)가 들어도 안전하게 이스케이프한다(fmt 문자열 조립은 깨진 XML 을 낼 수 있다).
 // 서버 STS 어댑터의 getCallerIdentityResponse 가 로컬 이름 기준으로 뽑으므로 요소 이름만 맞으면
-// 된다. xmlns 는 attr 로 실어 실제 응답 형태를 유지한다.
+// 된다. xmlns 는 attr 로 실어 실제 응답 형태를 유지한다. 서버 어댑터의 비공개 struct 와 형태가
+// 겹치지만, 데모 목을 서버 내부에 커플링하지 않으려고 로컬에 따로 둔다.
 type stsResponse struct {
 	XMLName xml.Name  `xml:"GetCallerIdentityResponse"`
 	Xmlns   string    `xml:"xmlns,attr"`

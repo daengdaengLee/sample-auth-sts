@@ -142,8 +142,15 @@ func buildServices(logger *slog.Logger) (domain.Authenticator, domain.TokenVerif
 			return nil, nil, err
 		}
 		// http.DefaultTransport 를 복제해 표준 동작(환경 프록시/HTTP2/유휴 커넥션 기본값)을 보존하고
-		// TLSClientConfig 만 덮는다. 맨 http.Transport 를 새로 만들면 그 기본값들이 빠진다.
-		transport := http.DefaultTransport.(*http.Transport).Clone()
+		// TLSClientConfig 만 덮는다. 맨 http.Transport 를 새로 만들면 그 기본값들이 빠진다. 복제로
+		// Proxy(ProxyFromEnvironment)도 켜지지만, Go 의 httpproxy 가 loopback/localhost 를 자동
+		// 우회하므로 데모 위임 대상(https://localhost:...)은 프록시를 타지 않는다. 표준형이 아닌
+		// RoundTripper 로 교체된 드문 경우엔 comma-ok 로 걸러 맨 Transport 로 폴백한다(부팅 패닉 회피).
+		base, ok := http.DefaultTransport.(*http.Transport)
+		transport := &http.Transport{}
+		if ok {
+			transport = base.Clone()
+		}
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 		httpClient.Transport = transport
 		logger.Info("데모 전용 STS CA 신뢰 로드", slog.String("sts_ca_file", caFile))
