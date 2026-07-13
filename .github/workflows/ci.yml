@@ -1,0 +1,50 @@
+name: CI
+
+# push/PR 마다 두 모듈(server/client)의 빌드/vet/gofmt/테스트(+race)와 클라이언트 크로스모듈
+# e2e(-tags e2e)를 자동 실행한다. e2e 안에 presigned 만료 상한의 클라이언트/서버 일치 가드
+# (TestPresignExpiryBoundsAgree)가 있어, 두 상수가 어긋나면 여기서 잡힌다.
+on:
+  push:
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: samplego/server
+    steps:
+      - uses: actions/checkout@v4
+      # go 1.26.4 는 최신이라 정확 버전 고정 대신 stable 기준으로 두고, go.mod 의 go 지시가
+      # 필요한 툴체인을 자동 다운로드하도록 GOTOOLCHAIN 자동 전환에 맡긴다.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go build ./...
+      - run: go vet ./...
+      # gofmt 게이트: 기존 무관 파일(issuer.go)만 관용하고, 그 외 미정렬 파일이 있으면 실패한다.
+      - name: gofmt
+        run: |
+          out=$(gofmt -l . | grep -v '^adapter/outbound/issuer/issuer.go$' || true)
+          if [ -n "$out" ]; then echo "gofmt 필요:"; echo "$out"; exit 1; fi
+      - run: go test -race ./...
+
+  client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: samplego/client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go build ./...
+      - run: go vet ./...
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt 필요:"; echo "$out"; exit 1; fi
+      - run: go test -race ./...
+      # 크로스모듈 e2e(실 라우터 + 목 STS). 상한 일치 가드를 포함한다.
+      - run: go test -tags e2e -race ./internal/e2e/...
