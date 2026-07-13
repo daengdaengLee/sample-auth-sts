@@ -350,6 +350,16 @@ cd samplego/client && go test -tags e2e ./internal/e2e/...
 
 이 테스트는 실제 서버 라우터(`inbound.NewRouter`)와 실제 아웃바운드 어댑터를 그대로 조립해 `httptest`로 띄우고, 목 STS(`httptest` TLS)로 위임을 흉내냅니다. 클라이언트는 static dummy 자격증명으로 실제 SigV4 서명을 만들어 `/auth`로 보내고, 발급된 JWT 를 `/verify`로 왕복해 클레임까지 확인합니다. 서버 검증 로직을 복제하지 않고 실제 코드를 태우므로, 클라이언트가 만든 엔벨로프가 서버 와이어 계약과 실제로 맞물리는지 검증합니다.
 
+#### 개발/테스트
+
+두 모듈(서버/클라이언트)의 빌드/vet/gofmt/테스트(-race)와 위 크로스모듈 e2e 를 한 명령으로 돌리려면 루트의 `Makefile` 을 씁니다.
+
+```
+make check
+```
+
+`make check` 는 빌드 + `go vet` + gofmt 검사 + 테스트(`-race`, 그리고 `-tags e2e` 로 e2e 포함)를 두 모듈에 대해 순서대로 돌립니다. e2e 스위트에는 클라이언트와 서버가 각자 정의하는 presigned 만료 상한(pre-signed URL 의 `X-Amz-Expires` 최대치)이 서로 일치하는지 확인하는 가드가 들어 있어, 한쪽만 바뀌어 어긋나면 여기서 잡힙니다. 같은 스위트를 GitHub Actions(`.github/workflows/ci.yml`)가 push/PR 마다 강제합니다.
+
 #### 와이어 계약 요약
 
 두 컴포넌트가 주고받는 HTTP 계약은 다음과 같습니다(참고용).
