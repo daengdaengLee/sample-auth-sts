@@ -75,11 +75,12 @@ func Generate(hosts []string) (tls.Certificate, []byte, error) {
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 
-	keyDER, err := x509.MarshalECPrivateKey(key)
+	// 키 타입 비의존 표준형(PKCS8)으로 마샬한다("PRIVATE KEY" 블록).
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("데모 키 마샬 실패: %w", err)
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 
 	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {

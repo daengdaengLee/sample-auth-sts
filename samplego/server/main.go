@@ -141,9 +141,11 @@ func buildServices(logger *slog.Logger) (domain.Authenticator, domain.TokenVerif
 		if err != nil {
 			return nil, nil, err
 		}
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-		}
+		// http.DefaultTransport 를 복제해 표준 동작(환경 프록시/HTTP2/유휴 커넥션 기본값)을 보존하고
+		// TLSClientConfig 만 덮는다. 맨 http.Transport 를 새로 만들면 그 기본값들이 빠진다.
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		httpClient.Transport = transport
 		logger.Info("데모 전용 STS CA 신뢰 로드", slog.String("sts_ca_file", caFile))
 	}
 
