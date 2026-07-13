@@ -33,7 +33,7 @@ var headerSegment = base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256",
 // 과 inbound.verifyResponse 도 함께 갱신한다(domain.VerifiedToken doc 참고).
 type claims struct {
 	Iss     string `json:"iss"`
-	Sub     string `json:"sub"`     // Identity.ARN. 허용 목록 대조 대상이자 안정적 주체 식별자.
+	Sub     string `json:"sub"` // Identity.ARN. 허용 목록 대조 대상이자 안정적 주체 식별자.
 	Aud     string `json:"aud"`
 	Iat     int64  `json:"iat"`     // 발급 시각(Unix 초).
 	Exp     int64  `json:"exp"`     // 만료 시각(Unix 초). exp = iat + TTL.
