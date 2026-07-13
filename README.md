@@ -168,6 +168,7 @@ C4Container
 - **허용 신원(ARN/역할)**: STS가 돌려준 ARN을 대조할 허용 목록. 유효한 AWS 신원이라고 무엇이든 받지 않고 이 목록에 든 신원만 받아들입니다.
 - **요청 만료 허용 구간**: 서버가 받아들일 서명 요청의 최대 유효 구간(최대 age). 클라이언트가 정하는 만료와는 다른, 서버 측 값입니다.
 - **STS 엔드포인트 허용 목록(allowlist)**: 위임을 허용할 진짜 STS 엔드포인트. `공통`의 STS 엔드포인트/리전 값을 강제해 가짜 엔드포인트로의 전달을 막습니다.
+- **데모 전용 STS CA 파일(선택)**: 실 AWS 없이 목 STS 로 로컬 데모를 돌릴 때만 쓰는 옵션. STS 위임에 쓰는 HTTP 클라이언트가 이 PEM 의 CA 만 추가로 신뢰하게 해(`RootCAs`) 목 STS 의 self-signed 인증서를 신뢰합니다. 미설정이면 시스템 신뢰 저장소만 씁니다(`실행 및 데모 > 로컬 데모(실 AWS 없이)` 참고).
 
 ### 서버
 
@@ -300,6 +301,8 @@ cd samplego/server && go run .
 
 설정 파일 값은 대응 환경변수로 덮어쓸 수 있습니다(키의 점을 밑줄로 바꾼 이름, 예: `policy.binding_value` -> `POLICY_BINDING_VALUE`). 커밋된 `jwt.signing_secret`은 데모 전용이므로 실 배포에서는 반드시 `JWT_SIGNING_SECRET` 등으로 교체하세요(`제한 사항` 참고).
 
+`sts.ca_file`(env `STS_CA_FILE`)은 데모 전용 옵션으로, 설정하면 STS 위임에 쓰는 HTTP 클라이언트가 그 PEM 의 CA 만 추가로 신뢰합니다(`RootCAs`). 실 AWS 없이 목 STS 로 왕복을 돌릴 때만 쓰며, 미설정이면 시스템 신뢰 저장소로 진짜 STS 를 검증합니다(`로컬 데모(실 AWS 없이)` 참고).
+
 #### 클라이언트 실행
 
 클라이언트는 보유한 AWS 자격증명으로 `GetCallerIdentity` 요청에 서명해 서버 `/auth`로 보내고, 발급 토큰을 받은 뒤 `--verify`를 주면 `/verify`로 왕복 확인합니다.
@@ -340,15 +343,45 @@ cd samplego/client && go run . --form presigned --presign-expiry 1m --verify
 
 #### 로컬 데모(실 AWS 없이)
 
-정직하게 밝히면, "서버 바이너리 대 클라이언트 바이너리 + 목 STS" 형태의 완전한 로컬 데모는 어렵습니다. 서버의 STS 신원 검증 어댑터는 위임 대상이 https 여야 하는데, 목 STS 를 띄우는 `httptest` TLS 서버의 자체 서명 인증서를 서버 바이너리가 신뢰하지 않기 때문입니다.
+실 AWS 없이 "목 STS + 서버 + 클라이언트" 세 프로세스를 `go run` 으로 띄워 서명 -> 전송 -> 발급 -> `/verify` 왕복을 처음부터 끝까지 관통해 볼 수 있습니다. 유일한 걸림돌이던 server -> 목 STS 구간의 TLS 신뢰는, 목 STS 가 부팅 때 self-signed 인증서를 생성해 그 CA 를 파일로 내보내고 서버가 그 CA 만 추가로 신뢰(`sts.ca_file`)하게 해서 잇습니다. "지정한 CA 만 신뢰"하는 표준 TLS 방식이라 검증을 끄지 않습니다(`InsecureSkipVerify` 를 쓰지 않음). 이 CA 신뢰와 목 STS 는 오로지 데모 전용이며 실 배포에서는 쓰지 마세요(`제한 사항` 참고).
 
-실 AWS 없이 서명 -> 전송 -> 발급 -> `/verify` 왕복을 처음부터 끝까지 관통하는 경로는 크로스모듈 e2e 테스트입니다.
+터미널 세 개로 순서대로 실행합니다. 목 STS 를 먼저 띄워야 서버가 그 CA 파일을 읽을 수 있습니다.
+
+터미널 1, 목 STS(TLS, 서명 미검증). 부팅 때 `mocksts-ca.pem` 을 서버 작업 디렉터리에 생성하고 `https://localhost:8443` 에서 위임을 받습니다.
+
+```
+cd samplego/server && go run ./cmd/mocksts
+```
+
+터미널 2, 서버. 목 STS URL 을 STS 엔드포인트 허용 목록으로, 방금 생성된 CA 파일을 `STS_CA_FILE` 로 가리킵니다. 나머지 기본값(`policy.allowed_arns` 등)은 목 STS 가 돌려주는 신원과 이미 정렬돼 있어 추가 설정이 필요 없습니다.
+
+```
+cd samplego/server && STS_ENDPOINT_ALLOWLIST=https://localhost:8443 STS_CA_FILE=./mocksts-ca.pem go run .
+```
+
+터미널 3, 클라이언트. static 자격증명으로 목 STS 를 대상으로 서명해(실 AWS 불필요) `/auth` 로 보내고, `--verify` 로 발급 토큰을 `/verify` 까지 왕복합니다. `localhost` 는 표준 STS 호스트가 아니라 리전 파생/정합 검사를 건너뛰므로 `--region` 을 함께 명시합니다.
+
+```
+cd samplego/client && go run . \
+  --sts-endpoint https://localhost:8443 --region us-east-1 \
+  --static-creds --static-access-key-id AKIDEXAMPLE --static-secret-key secretexamplekey \
+  --verify
+```
+
+성공하면 클라이언트가 발급 토큰(3 세그먼트 JWT)과 만료를, 이어서 `/verify` 가 되돌려준 클레임(`iss`/`sub`/`aud`/`account` 등)을 표준 출력에 찍습니다. `sub` 는 목 STS 가 돌려준 ARN(`arn:aws:iam::123456789012:role/workload`)입니다. pre-signed URL 형태로 돌리려면 클라이언트에 `--form presigned --presign-expiry 1m` 을 더합니다(목 STS/서버는 그대로 둡니다).
+
+```
+cd samplego/client && go run . \
+  --sts-endpoint https://localhost:8443 --region us-east-1 \
+  --static-creds --static-access-key-id AKIDEXAMPLE --static-secret-key secretexamplekey \
+  --form presigned --presign-expiry 1m --verify
+```
+
+서버 라우터와 실제 아웃바운드 어댑터를 그대로 태우면서 실 프로세스 없이 같은 왕복을 회귀로 잡는 경로로는 크로스모듈 e2e 테스트도 있습니다. 실제 서버 라우터(`inbound.NewRouter`)와 아웃바운드 어댑터를 조립해 `httptest` 로 띄우고 목 STS(`httptest` TLS)로 위임을 흉내내며, 서버 검증 로직을 복제하지 않아 클라이언트 엔벨로프가 서버 와이어 계약과 맞물리는지 검증합니다.
 
 ```
 cd samplego/client && go test -tags e2e ./internal/e2e/...
 ```
-
-이 테스트는 실제 서버 라우터(`inbound.NewRouter`)와 실제 아웃바운드 어댑터를 그대로 조립해 `httptest`로 띄우고, 목 STS(`httptest` TLS)로 위임을 흉내냅니다. 클라이언트는 static dummy 자격증명으로 실제 SigV4 서명을 만들어 `/auth`로 보내고, 발급된 JWT 를 `/verify`로 왕복해 클레임까지 확인합니다. 서버 검증 로직을 복제하지 않고 실제 코드를 태우므로, 클라이언트가 만든 엔벨로프가 서버 와이어 계약과 실제로 맞물리는지 검증합니다.
 
 #### 개발/테스트
 
@@ -376,7 +409,8 @@ make check
 - **커밋된 샘플 시크릿**: `config.yaml`의 `jwt.signing_secret`은 데모 편의를 위해 저장소에 그대로 커밋된 값입니다. 실 배포에서는 절대 이 값을 쓰지 말고 `JWT_SIGNING_SECRET` 환경변수나 별도 시크릿 관리로 교체하세요.
 - **리전/엔드포인트 로컬 검사 범위**: 클라이언트는 표준 AWS 파티션(global, 표준/gov 리전 등)에 대해서만 `--region`과 `--sts-endpoint`의 로컬 정합성을 검사하고 한쪽에서 다른 쪽을 파생합니다. cn 파티션, dualstack, FIPS dualstack 처럼 손수 목록에 없는 형태는 파생/검사를 건너뛰므로, 그런 대상은 `--sts-endpoint`와 `--region`을 함께 명시해야 합니다.
 - **그럴듯한 리전 오타는 못 거름**: 리전 형식 검사는 리전답지 않은 문자열만 거릅니다. 형식상 정상인 오타(예: `eu-wast-1`)는 로컬에서 통과하며, 실재 여부 판단은 서버 검증(STS 위임)에 위임됩니다.
-- **데모의 STS 는 목/스텁**: 위 로컬 e2e 경로에서 STS 는 실제 AWS 가 아니라 서명을 검증하지 않는 목 서버입니다. 서명 위조 거절 같은 실제 STS 동작은 실 AWS 흐름에서만 확인됩니다.
+- **데모의 STS 는 목/스텁**: 로컬 데모/e2e 경로에서 STS 는 실제 AWS 가 아니라 서명을 검증하지 않는 목 서버입니다(누가 서명했든 성공 XML 을 돌려줍니다). 서명 위조 거절 같은 실제 STS 동작은 실 AWS 흐름에서만 확인됩니다.
+- **데모 전용 CA 신뢰/인증서**: 로컬 데모의 목 STS(`samplego/server/cmd/mocksts`)는 부팅 때 self-signed 인증서를 생성해 그 CA 를 파일로 내보내고, 서버는 `sts.ca_file`(`STS_CA_FILE`)로 그 CA 만 추가로 신뢰합니다. 이는 "지정한 CA 만 신뢰"하는 표준 TLS 방식이며 검증을 끄지 않습니다(`InsecureSkipVerify` 를 쓰지 않음). 생성 CA(`mocksts-ca.pem`)와 목 STS, `sts.ca_file` 옵션은 오로지 데모 전용이라 저장소에 커밋하지 않으며(`.gitignore` 처리) 실 배포에서는 쓰지 마세요.
 - **로컬 전송은 평문 HTTP**: 클라이언트 -> 서버 로컬 전송은 평문 HTTP 를 씁니다. 서명된 요청에는 액세스 키 ID 와 (임시 자격증명이면) 세션 토큰이 담기므로, 실 배포에서는 이 구간을 반드시 HTTPS 로 보호해야 합니다(`개요 > 보안 고려사항` 참고).
 
 ## 참고 자료
