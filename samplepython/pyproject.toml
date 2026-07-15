@@ -1,0 +1,51 @@
+# samplepython 프로젝트 설정. uv 로 환경/의존성을 관리한다(uv.lock 커밋).
+# 이 프로젝트는 배포용 라이브러리가 아니라 실행 샘플이므로 package = false 로 두고,
+# server/client 패키지는 pythonpath(cwd)로 import 한다. 표준 진입점은 Makefile 의 `make check`.
+[project]
+name = "samplepython"
+version = "0.0.0"
+description = "PoP 기반 Workload Identity Federation 인증 샘플(AWS STS)의 파이썬 구현"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+    "httpx>=0.28",
+    "cryptography>=44.0",
+    "boto3>=1.35",
+    "botocore>=1.35",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-httpserver>=1.1",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "types-pyyaml>=6.0",
+]
+
+# 배포 패키지가 아니라 실행 샘플이라 프로젝트 자체는 빌드/설치하지 않는다(가상 프로젝트).
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# gofmt+go vet 게이트에 대응. 기본 규칙(E/F) + import 정렬(I) + 버그류(B) + 업그레이드(UP).
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+# 서드파티 스텁 부재로 인한 잡음을 줄인다(botocore 등은 자체 타입이 부분적).
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+# server/client 를 cwd 기준으로 import 한다(가상 프로젝트라 설치하지 않음).
+pythonpath = ["."]
+testpaths = ["tests"]
