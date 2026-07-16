@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -59,10 +60,12 @@ class Client:
         """엔벨로프를 /auth 로 POST 해 발급 토큰을 받는다."""
 
         body = self._post_json("/auth", envelope.to_dict())
-        return AuthResult(
-            token=str(body["token"]),
-            expires_at=_parse_rfc3339(str(body["expires_at"])),
-        )
+        # 200 인데 필드가 없으면 KeyError 대신 명확한 에러로 처리한다(형식 어긋난 응답 방어).
+        token = body.get("token")
+        expires_at = body.get("expires_at")
+        if not isinstance(token, str) or not isinstance(expires_at, str):
+            raise APIError(200, "invalid_response", "서버 응답에 token/expires_at 이 없음")
+        return AuthResult(token=token, expires_at=_parse_rfc3339(expires_at))
 
     def post_verify(self, token: str) -> Claims:
         """토큰을 /verify 로 POST 해 클레임을 받는다."""
@@ -89,11 +92,10 @@ class Client:
         )
         content = resp.content[:_MAX_RESPONSE_BYTES]
         try:
-            data = httpx.Response(resp.status_code, content=content).json()
+            parsed = json.loads(content)
         except ValueError:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
+            parsed = None
+        data: dict[str, object] = parsed if isinstance(parsed, dict) else {}
 
         if resp.status_code != 200:
             raise APIError(

@@ -31,6 +31,8 @@ _ERR_XML = (
         ("https://sts.amazonaws.com", "https://sts.amazonaws.com:443"),
         ("https://sts.amazonaws.com/", "https://sts.amazonaws.com:443"),
         ("https://sts.amazonaws.com.", "https://sts.amazonaws.com:443"),
+        # 후행 점은 하나만 뗀다(Go TrimSuffix 대응). rstrip 이면 둘 다 지워 어긋난다.
+        ("https://sts.amazonaws.com..", "https://sts.amazonaws.com.:443"),
         ("https://STS.amazonaws.com", "https://sts.amazonaws.com:443"),
         ("https://localhost:8443", "https://localhost:8443"),
         ("http://sts.amazonaws.com", ""),  # 비-https 는 무효
@@ -114,3 +116,21 @@ def test_5xx_is_infra_error() -> None:
 def test_new_verifier_rejects_no_valid_endpoint() -> None:
     with pytest.raises(ValueError, match="유효한 https"):
         sts.new_verifier(httpx.Client(), StsSettings(endpoint_allowlist="http://plain, garbage"))
+
+
+def test_build_client_bad_ca_file_clear_error() -> None:
+    # 없는 CA 파일이면 raw ssl/OS 오류 대신 명확한 ValueError 로 부팅을 실패시킨다.
+    with pytest.raises(ValueError, match="로드 실패"):
+        sts.build_client(timeout=5.0, ca_file="/nonexistent/mocksts-ca.pem")
+
+
+def test_oversized_success_response_is_infra_error() -> None:
+    # 200 이지만 상한을 초과한 본문은 신뢰할 수 없어 인프라 오류로 본다(스트리밍 상한 강제).
+    big = b"<x>" + b"A" * (1 << 21) + b"</x>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=big)
+
+    v = _verifier(httpx.MockTransport(handler), ["https://sts.amazonaws.com"])
+    with pytest.raises(RuntimeError, match="상한"):
+        v.verify_identity(_preserved())

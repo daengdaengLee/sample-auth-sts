@@ -7,6 +7,7 @@ Go 의 MaxBytesReader -> ShouldBindJSON 순서(상한 -> 파싱, 413이 400보�
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from starlette.requests import Request
@@ -37,6 +38,14 @@ def error_response(status: int, code: str, message: str) -> JSONResponse:
     """실패 응답을 JSON({error, message})으로 쓴다."""
 
     return JSONResponse(status_code=status, content={"error": code, "message": message})
+
+
+def rfc3339(dt: datetime) -> str:
+    """datetime 을 RFC3339(UTC 는 'Z' 접미사)로 직렬화한다. Go time.RFC3339 와 바이트 단위로
+    맞춘다(Python isoformat 의 '+00:00' 대신 'Z'). /auth 와 /verify 가 공유한다.
+    """
+
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 async def read_json_capped(request: Request, limit: int) -> Any:

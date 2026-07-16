@@ -118,7 +118,10 @@ def _normalize_endpoint(raw: str) -> str:
     hostname = u.hostname
     if hostname is None or hostname == "":
         return ""
-    host = hostname.lower().rstrip(".")
+    # 후행 점 하나만 뗀다(Go TrimSuffix 대응). rstrip 은 여러 점을 지워 정규화가 어긋난다.
+    host = hostname.lower()
+    if host.endswith("."):
+        host = host[:-1]
     if host == "":
         return ""
 
@@ -165,32 +168,32 @@ class Verifier:
         # 리다이렉트는 끄므로(client 설정) 3xx 가 그대로 돌아온다. Host 헤더는 headers 에 명시로
         # 실어 httpx 가 URL 로 재계산하지 않고 서명된 값을 그대로 보내게 한다(SNI 는 URL host 에서
         # 파생되므로 별도 지정하지 않는다).
+        #
+        # 스트리밍으로 받아 본문 읽기 자체를 상한으로 제한한다. request() 로 받으면 httpx 가 본문
+        # 전체를 먼저 메모리에 올린 뒤라 사후 슬라이스로는 메모리 고갈을 못 막는다. 상한을 넘는
+        # 순간 순회를 멈춰 실제 읽기를 상한 + 한 청크 이내로 묶는다(Go io.LimitReader 대응).
         try:
-            resp = self._client.request(
+            with self._client.stream(
                 req.method,
                 req.url,
                 content=req.body,
                 headers=headers,
-            )
+            ) as resp:
+                status = resp.status_code
+                location = resp.headers.get("Location", "")
+                body, oversized = _read_capped(resp)
         except httpx.HTTPError as e:
             raise RuntimeError(f"STS 위임 요청 전송 실패: {e}") from e
 
-        # 본문은 상한을 두고 읽는다. 한 바이트 더 읽어 초과 여부만 기록해 두고, 상태 기반 분류를
-        # 먼저 적용한다. 큰 본문을 가진 4xx 무자격 응답이 인프라 오류로 오분류되지 않도록, 초과는
-        # 본문을 신뢰해 파싱해야 하는 성공 경로에서만 오류로 낸다.
-        body = resp.content[: _MAX_RESPONSE_BYTES + 1]
-        oversized = len(body) > _MAX_RESPONSE_BYTES
-
         # 리다이렉트를 끄므로 3xx 가 여기까지 온다. STS 는 정상적으로 리다이렉트하지 않으니,
         # 따라가지 않은 3xx 는 무자격이 아니라 인프라 오류(예기치 않은 응답)다.
-        if 300 <= resp.status_code < 400:
-            location = resp.headers.get("Location", "")
+        if 300 <= status < 400:
             raise RuntimeError(
-                f"STS 가 예기치 않게 리다이렉트함(status={resp.status_code}, location={location!r})"
+                f"STS 가 예기치 않게 리다이렉트함(status={status}, location={location!r})"
             )
 
-        if resp.status_code != 200:
-            raise _classify_error_response(resp.status_code, body)
+        if status != 200:
+            raise _classify_error_response(status, body)
 
         # 성공 응답은 본문을 XML 파싱하므로, 상한을 넘었다면(신뢰 불가) 인프라 오류로 본다.
         if oversized:
@@ -208,6 +211,24 @@ class Verifier:
         user_id = _find_text(root, ["GetCallerIdentityResult", "UserId"])
 
         return Identity(arn=arn, account=account, user_id=user_id)
+
+
+def _read_capped(resp: httpx.Response) -> tuple[bytes, bool]:
+    """스트리밍 응답 본문을 최대 상한 + 한 청크까지만 읽어 (body, oversized)를 돌려준다. 누적
+    크기가 상한을 넘는 순간 순회를 멈춰 실제 읽기를 제한한다(메모리 고갈 방지). oversized 는
+    본문이 상한을 초과했는지다(초과 시 body 는 그 시점까지의 바이트).
+    """
+
+    chunks: list[bytes] = []
+    total = 0
+    oversized = False
+    for chunk in resp.iter_bytes():
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > _MAX_RESPONSE_BYTES:
+            oversized = True
+            break
+    return b"".join(chunks), oversized
 
 
 def _build_headers(req: PreservedRequest) -> dict[str, str]:
@@ -289,7 +310,12 @@ def build_client(timeout: float, ca_file: str = "") -> httpx.Client:
     verify: ssl.SSLContext | bool
     if ca_file != "":
         # cafile 을 주면 시스템 신뢰 저장소를 로드하지 않고 그 CA 만 신뢰한다(배타적 대체).
-        verify = ssl.create_default_context(cafile=ca_file)
+        # 파일이 없거나 유효한 인증서가 아니면 raw ssl/OS 오류 대신 명확한 메시지로 부팅을
+        # 실패시킨다(Go LoadCAPool 의 명확한 에러 대응).
+        try:
+            verify = ssl.create_default_context(cafile=ca_file)
+        except (OSError, ssl.SSLError) as e:
+            raise ValueError(f"STS CA 파일({ca_file}) 로드 실패: {e}") from e
     else:
         verify = True
     return httpx.Client(timeout=timeout, follow_redirects=False, verify=verify)

@@ -106,6 +106,17 @@ def test_bad_base64_body_400() -> None:
     assert r.json()["error"] == "invalid_body"
 
 
+def test_base64_with_embedded_junk_rejected_strictly() -> None:
+    # 알파벳 외 문자가 섞인 body 는 엄격 디코드(validate=True)로 거부된다. 관대한 디코드였다면
+    # 공백을 버리고 통과시켜 Go 와 어긋났을 입력이다.
+    env = _valid_envelope()
+    good = env["body"]
+    env["body"] = good[:8] + " " + good[8:]
+    r = _client(_FakeAuth()).post("/auth", json=env)
+    assert r.status_code == 400
+    assert r.json()["error"] == "invalid_body"
+
+
 def test_binding_not_signed_403() -> None:
     env = _valid_envelope()
     # SignedHeaders 에서 x-server-binding 을 뺀다 -> 바인딩이 서명 범위 밖.

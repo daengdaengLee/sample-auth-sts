@@ -39,6 +39,18 @@ def test_post_auth_api_error() -> None:
     assert ei.value.code == "binding_mismatch"
 
 
+def test_post_auth_missing_token_is_api_error() -> None:
+    # 200 인데 token/expires_at 이 없으면 KeyError 가 아니라 APIError 로 처리한다.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": "shape"})
+
+    with pytest.raises(APIError) as ei:
+        _client(httpx.MockTransport(handler)).post_auth(
+            Envelope(method="POST", url="x", headers={}, body="")
+        )
+    assert ei.value.code == "invalid_response"
+
+
 def test_post_verify_success() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/verify"

@@ -7,9 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
-from server.adapter.inbound.http_util import ClientError
+from server.adapter.inbound.http_util import ClientError, rfc3339
 from server.domain.errors import as_rejection, as_verification_rejected
 from server.domain.ports import TokenVerifier
 from server.domain.types import VerifyTokenInput
@@ -50,8 +48,8 @@ class VerifyHandler:
             "iss": claims.issuer,
             "sub": claims.subject,
             "aud": claims.audience,
-            "exp": _rfc3339(claims.expires_at),
-            "iat": _rfc3339(claims.issued_at),
+            "exp": rfc3339(claims.expires_at),
+            "iat": rfc3339(claims.issued_at),
             "jti": claims.jti,
             "account": claims.account,
             "user_id": claims.user_id,
@@ -78,9 +76,3 @@ def _map_error(err: Exception) -> tuple[int, dict[str, str]]:
     # 그 외는 내부 실패다. 검증 경로에는 외부 위임이 없어 실무상 거의 없지만, 예기치 못한 오류를
     # 성공/무효로 오분류하지 않도록 500 으로 매핑한다.
     return 500, {"error": "internal_error", "message": "토큰 검증 중 내부 오류"}
-
-
-def _rfc3339(dt: datetime) -> str:
-    """datetime 을 RFC3339(UTC 는 'Z' 접미사)로 직렬화한다(Go time.RFC3339 대응)."""
-
-    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

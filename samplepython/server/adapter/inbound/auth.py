@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 
-from server.adapter.inbound.http_util import ClientError
+from server.adapter.inbound.http_util import ClientError, rfc3339
 from server.domain.errors import (
     RejectionReason,
     as_rejection,
@@ -92,8 +92,10 @@ class AuthHandler:
 
         # 서명 대상 바이트를 그대로 되살리려고 base64 로 디코드한다. STS 는 이 바이트에 대해 서명을
         # 재검증하므로, 한 바이트라도 어긋나면 위임이 거절된다.
+        # validate=True 로 알파벳 외 문자를 거부한다(Go base64.StdEncoding 의 엄격 디코드 대응).
+        # 기본 b64decode 는 비알파벳 문자를 조용히 버려, Go 가 400 으로 거를 입력을 통과시킨다.
         try:
-            body = base64.standard_b64decode(req.body)
+            body = base64.b64decode(req.body, validate=True)
         except (binascii.Error, ValueError) as e:
             raise ClientError(400, "invalid_body", "body 는 base64(표준 인코딩)여야 함") from e
 
@@ -131,7 +133,7 @@ class AuthHandler:
 
         return 200, {
             "token": out.credential.token,
-            "expires_at": _rfc3339(out.credential.expires_at),
+            "expires_at": rfc3339(out.credential.expires_at),
         }
 
     def map_error(self, err: Exception) -> tuple[int, dict[str, str]]:
@@ -430,11 +432,3 @@ def _parse_signed_header_list(value: str) -> set[str]:
     """세미콜론으로 구분된 SignedHeaders 목록을 소문자 집합으로 돌려준다. 비면 빈 집합이다."""
 
     return {name.strip().lower() for name in value.split(";") if name.strip()}
-
-
-def _rfc3339(dt: datetime) -> str:
-    """datetime 을 RFC3339(UTC 는 'Z' 접미사)로 직렬화한다. Go time.RFC3339 와 바이트 단위로
-    맞춘다(Python isoformat 의 '+00:00' 대신 'Z').
-    """
-
-    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

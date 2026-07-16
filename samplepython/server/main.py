@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 import uvicorn
 from fastapi import FastAPI
@@ -105,7 +106,13 @@ def main() -> None:
     if (addr := os.environ.get("LISTEN_ADDR", "")) != "":
         host, port = _parse_listen_addr(addr)
 
-    app = build_app(logger)
+    # 조립/검증 실패(설정 로드, 정책/발급/STS 검증, CA 로드 등)는 부팅 오설정이므로, raw
+    # 스택트레이스 대신 한 줄 에러 로그로 드러내고 종료한다(Go main 의 run 에러 경계 대응).
+    try:
+        app = build_app(logger)
+    except Exception as e:  # noqa: BLE001 - 모든 부팅 실패를 깔끔한 로그로 드러낸다
+        logger.error("server exited with error", extra={"error": str(e)})
+        sys.exit(1)
 
     logger.info("server starting", extra={"host": host, "port": port})
     # uvicorn 이 SIGINT/SIGTERM 에서 graceful 셧다운을 처리한다. 접근 로그는 자체 미들웨어가
