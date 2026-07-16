@@ -39,6 +39,33 @@ def test_post_auth_api_error() -> None:
     assert ei.value.code == "binding_mismatch"
 
 
+def test_post_auth_unparseable_expires_at_is_api_error() -> None:
+    # 200 인데 expires_at 형식이 틀리면 ValueError 가 아니라 APIError 로 처리한다(status=None).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"token": "h.p.s", "expires_at": "not-a-date"})
+
+    with pytest.raises(APIError) as ei:
+        _client(httpx.MockTransport(handler)).post_auth(
+            Envelope(method="POST", url="x", headers={}, body="")
+        )
+    assert ei.value.code == "invalid_response"
+    assert ei.value.status is None
+
+
+def test_oversized_response_is_api_error() -> None:
+    # 상한(1 MiB)을 초과한 응답은 스트리밍 상한에서 잘려 response_too_large 로 거부된다.
+    big = b'{"token":"' + b"A" * (1 << 21) + b'"}'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=big)
+
+    with pytest.raises(APIError) as ei:
+        _client(httpx.MockTransport(handler)).post_auth(
+            Envelope(method="POST", url="x", headers={}, body="")
+        )
+    assert ei.value.code == "response_too_large"
+
+
 def test_post_auth_missing_token_is_api_error() -> None:
     # 200 인데 token/expires_at 이 없으면 KeyError 가 아니라 APIError 로 처리한다.
     def handler(request: httpx.Request) -> httpx.Response:
