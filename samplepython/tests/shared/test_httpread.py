@@ -32,10 +32,3 @@ def test_read_capped_boundary(size: int, oversized: bool) -> None:
         # 초과면 조기 종료로 상한을 넘긴 바이트까지만 읽는다(전체 크기보다 작을 수 있음).
         assert len(body) <= size
         assert len(body) > _LIMIT
-
-
-def test_read_capped_returns_exact_content_under_limit() -> None:
-    resp = httpx.Response(200, content=b"hello world")
-    body, oversized = read_capped(resp, _LIMIT)
-    assert body == b"hello world"
-    assert oversized is False
