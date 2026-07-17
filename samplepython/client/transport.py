@@ -11,7 +11,7 @@ from datetime import datetime
 import httpx
 
 from client.envelope import Envelope
-from server.internal.httpread import read_capped
+from shared.httpread import read_capped
 
 # 응답 본문을 읽을 최대 바이트(1 MiB). 서버 응답은 작으므로 넉넉히 둔다.
 _MAX_RESPONSE_BYTES = 1 << 20

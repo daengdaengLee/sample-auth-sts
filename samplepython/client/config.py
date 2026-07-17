@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from urllib.parse import urlsplit
 
-from server.internal.duration import DurationError, parse_duration
+from shared.duration import DurationError, parse_duration
 
 # AWS 리전 식별자의 형식. 표준(us-east-1), gov(us-gov-west-1), cn(cn-north-1) 형태를 모두 포용한다.
 # 실재 여부는 형식만으로 판별할 수 없으므로, 이 검사는 리전답지 않은 문자열만 거른다.

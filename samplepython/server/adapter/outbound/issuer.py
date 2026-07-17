@@ -24,7 +24,7 @@ from server.domain.errors import VerificationRejected
 from server.domain.ports import CredentialIssuer, TokenInspector, VerifyPolicy
 from server.domain.types import Credential, Identity, VerifiedToken
 from server.internal.config import JwtSettings
-from server.internal.duration import DurationError, parse_duration
+from shared.duration import DurationError, parse_duration
 
 # 기본 발급 TTL(jwt.ttl 미설정 시).
 _DEFAULT_TTL = timedelta(minutes=15)

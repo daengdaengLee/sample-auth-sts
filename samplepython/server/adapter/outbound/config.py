@@ -11,7 +11,7 @@ from datetime import timedelta
 
 from server.domain.ports import Policy
 from server.internal.config import PolicySettings
-from server.internal.duration import DurationError, parse_duration
+from shared.duration import DurationError, parse_duration
 
 # policy.request_max_age 가 설정되지 않았을 때 쓰는 기본 최대 age.
 _DEFAULT_MAX_AGE = timedelta(minutes=5)

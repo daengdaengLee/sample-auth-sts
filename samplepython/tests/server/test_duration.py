@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from server.internal.duration import DurationError, parse_duration
+from shared.duration import DurationError, parse_duration
 
 
 @pytest.mark.parametrize(

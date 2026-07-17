@@ -19,7 +19,7 @@ from server.domain.errors import VerificationRejected
 from server.domain.ports import IdentityVerifier
 from server.domain.types import Identity, PreservedRequest
 from server.internal.config import StsSettings
-from server.internal.httpread import read_capped
+from shared.httpread import read_capped
 
 # 재구성 시 요청 host 로 옮겨 실어야 하는 헤더 이름. httpx 는 URL 에서 Host 를 재계산하므로,
 # 보존된 Host 를 명시 헤더로 실어 서명 범위와 일치시킨다.
