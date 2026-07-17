@@ -66,6 +66,21 @@ def test_oversized_response_is_api_error() -> None:
     assert ei.value.code == "response_too_large"
 
 
+def test_oversized_non_200_preserves_status() -> None:
+    # 과대한 비200 오류 응답은 response_too_large 로 가려지지 않고 실제 status 를 보고한다.
+    big = b"A" * (1 << 21)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, content=big)
+
+    with pytest.raises(APIError) as ei:
+        _client(httpx.MockTransport(handler)).post_auth(
+            Envelope(method="POST", url="x", headers={}, body="")
+        )
+    assert ei.value.status == 502
+    assert ei.value.code != "response_too_large"
+
+
 def test_post_auth_missing_token_is_api_error() -> None:
     # 200 인데 token/expires_at 이 없으면 KeyError 가 아니라 APIError 로 처리한다.
     def handler(request: httpx.Request) -> httpx.Response:

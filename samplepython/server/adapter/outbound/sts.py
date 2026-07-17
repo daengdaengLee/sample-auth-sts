@@ -19,6 +19,7 @@ from server.domain.errors import VerificationRejected
 from server.domain.ports import IdentityVerifier
 from server.domain.types import Identity, PreservedRequest
 from server.internal.config import StsSettings
+from server.internal.httpread import read_capped
 
 # 재구성 시 요청 host 로 옮겨 실어야 하는 헤더 이름. httpx 는 URL 에서 Host 를 재계산하므로,
 # 보존된 Host 를 명시 헤더로 실어 서명 범위와 일치시킨다.
@@ -181,7 +182,7 @@ class Verifier:
             ) as resp:
                 status = resp.status_code
                 location = resp.headers.get("Location", "")
-                body, oversized = _read_capped(resp)
+                body, oversized = read_capped(resp, _MAX_RESPONSE_BYTES)
         except httpx.HTTPError as e:
             raise RuntimeError(f"STS 위임 요청 전송 실패: {e}") from e
 
@@ -211,24 +212,6 @@ class Verifier:
         user_id = _find_text(root, ["GetCallerIdentityResult", "UserId"])
 
         return Identity(arn=arn, account=account, user_id=user_id)
-
-
-def _read_capped(resp: httpx.Response) -> tuple[bytes, bool]:
-    """스트리밍 응답 본문을 최대 상한 + 한 청크까지만 읽어 (body, oversized)를 돌려준다. 누적
-    크기가 상한을 넘는 순간 순회를 멈춰 실제 읽기를 제한한다(메모리 고갈 방지). oversized 는
-    본문이 상한을 초과했는지다(초과 시 body 는 그 시점까지의 바이트).
-    """
-
-    chunks: list[bytes] = []
-    total = 0
-    oversized = False
-    for chunk in resp.iter_bytes():
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > _MAX_RESPONSE_BYTES:
-            oversized = True
-            break
-    return b"".join(chunks), oversized
 
 
 def _build_headers(req: PreservedRequest) -> dict[str, str]:

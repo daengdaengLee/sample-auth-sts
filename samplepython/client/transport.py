@@ -11,6 +11,7 @@ from datetime import datetime
 import httpx
 
 from client.envelope import Envelope
+from server.internal.httpread import read_capped
 
 # 응답 본문을 읽을 최대 바이트(1 MiB). 서버 응답은 작으므로 넉넉히 둔다.
 _MAX_RESPONSE_BYTES = 1 << 20
@@ -108,10 +109,7 @@ class Client:
             headers={"Content-Type": "application/json"},
         ) as resp:
             status = resp.status_code
-            content, oversized = _read_capped(resp)
-
-        if oversized:
-            raise APIError(None, "response_too_large", "서버 응답이 허용 크기를 초과함")
+            content, oversized = read_capped(resp, _MAX_RESPONSE_BYTES)
 
         try:
             parsed = json.loads(content)
@@ -119,30 +117,18 @@ class Client:
             parsed = None
         data: dict[str, object] = parsed if isinstance(parsed, dict) else {}
 
+        # 상태 분류를 먼저 한다(서버 sts.py 와 같은 순서). 과대한 비200 오류 응답이 실제 status 를
+        # 잃고 response_too_large 로 가려지지 않도록, oversized 는 200 성공 경로에서만 치명적으로
+        # 다룬다(비200 은 truncated 본문으로 파싱이 실패해도 실제 status 를 담아 보고한다).
         if status != 200:
             raise APIError(
                 status,
                 str(data.get("error", "")),
                 str(data.get("message", "")),
             )
+        if oversized:
+            raise APIError(None, "response_too_large", "서버 응답이 허용 크기를 초과함")
         return data
-
-
-def _read_capped(resp: httpx.Response) -> tuple[bytes, bool]:
-    """스트리밍 응답 본문을 최대 상한 + 한 청크까지만 읽어 (body, oversized)를 돌려준다. 누적
-    크기가 상한을 넘는 순간 순회를 멈춰 실제 읽기를 제한한다(메모리 고갈 방지).
-    """
-
-    chunks: list[bytes] = []
-    total = 0
-    oversized = False
-    for chunk in resp.iter_bytes():
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > _MAX_RESPONSE_BYTES:
-            oversized = True
-            break
-    return b"".join(chunks), oversized
 
 
 def _parse_rfc3339(value: str) -> datetime:
