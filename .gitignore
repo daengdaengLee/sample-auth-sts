@@ -34,6 +34,14 @@ go.work.sum
 # env file
 .env
 
+# Python (samplepython) 도구 산출물. uv.lock 은 커밋 대상이라 무시하지 않는다.
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
 # Editor/IDE
 .idea/
 .vscode/

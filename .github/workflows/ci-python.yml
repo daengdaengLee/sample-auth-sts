@@ -1,0 +1,40 @@
+name: CI (python)
+
+# push 마다 samplepython 의 포맷/린트/타입/테스트(+e2e)를 자동 실행한다. e2e 안에 presigned
+# 만료 상한의 클라이언트/서버 일치 가드(test_presign_expiry_bounds_agree)가 있어, 두 상수가
+# 어긋나면 여기서 잡힌다. 기존 Go CI(ci.yml)는 그대로 두고 파이썬 잡을 별도로 둔다.
+#
+# 트리거는 push 만 둔다(모든 브랜치). 같은 저장소 브랜치 PR 이 두 이벤트로 중복 실행되는 것을
+# 피하기 위해 pull_request 는 두지 않는다(기존 Go CI 와 같은 톤).
+on:
+  push:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  samplepython:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: samplepython
+    steps:
+      - uses: actions/checkout@v4
+      # uv 를 설치하고 .python-version 에 고정된 인터프리터를 쓴다.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install Python
+        run: uv python install
+      - name: Sync dependencies
+        run: uv sync
+      - name: Format check
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type check
+        run: uv run mypy .
+      - name: Test (unit + e2e)
+        run: uv run pytest
