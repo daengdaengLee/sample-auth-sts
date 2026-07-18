@@ -100,6 +100,8 @@ PoP는 시크릿 키가 보유자 곁을 떠나지 않게 해 *시크릿 유출*
 
 ## 구현 가이드
 
+이 가이드의 설계(아키텍처/요구 사항/설정/서버/클라이언트)는 언어에 의존하지 않으며, 두 참조 구현이 이를 공유합니다: Go 구현 `samplego/` 와 Python 구현 `samplepython/`. 두 구현은 같은 HTTP 와이어 계약(`실행 및 데모 > 와이어 계약 요약`)을 지키므로 서로 맞물려 동작합니다(한 구현의 클라이언트로 다른 구현의 서버를 인증할 수 있음). 아래 설계 절은 두 구현에 공통이며, 실제 실행 명령만 구현마다 다르므로 `실행 및 데모`에서 각각 다룹니다.
+
 ### 아키텍처
 
 아래 다이어그램은 이 샘플을 이루는 컴포넌트와 그 연결을 보여줍니다. 단계별 순서는 위 `인증 흐름`에서 다루므로, 여기서는 각 컴포넌트의 역할과 책임에 집중합니다.
@@ -392,6 +394,63 @@ make check
 ```
 
 `make check` 는 빌드 + `go vet` + gofmt 검사 + 테스트(`-race`, 그리고 `-tags e2e` 로 e2e 포함)를 두 모듈에 대해 순서대로 돌립니다. e2e 스위트에는 클라이언트와 서버가 각자 정의하는 presigned 만료 상한(pre-signed URL 의 `X-Amz-Expires` 최대치)이 서로 일치하는지 확인하는 가드가 들어 있어, 한쪽만 바뀌어 어긋나면 여기서 잡힙니다. 같은 스위트를 GitHub Actions(`.github/workflows/ci.yml`)가 push/PR 마다 강제합니다.
+
+#### 파이썬 구현(samplepython)
+
+`samplepython/` 은 위 설계를 파이썬으로 옮긴 두 번째 참조 구현입니다. 서버(FastAPI/헥사고날), 클라이언트(argparse/botocore SigV4 서명), 목 STS, 크로스모듈 e2e 를 갖추며, 명령만 다를 뿐 플래그 이름/환경변수/설정 의미와 와이어 계약은 위 Go 구현과 동일합니다(`--presign-expiry` 등 기간 표기도 같은 형식). 이 절은 실행 명령만 모아 두므로, 값의 의미는 위 `설정`/`서버 실행`/`클라이언트 실행` 을 그대로 참고하세요.
+
+전제: `uv` 가 설치돼 있어야 합니다. 파이썬 인터프리터는 uv 가 `.python-version`(3.13)으로 관리하며, 의존성은 `uv sync` 로 설치됩니다(아래 명령은 필요 시 자동 동기화). 데모 전용 주의사항(커밋된 시크릿/목 STS/평문 HTTP)은 Go 구현과 같으므로 `제한 사항` 을 참고하세요.
+
+서버 실행. cwd 의 `config.yaml` 을 읽어 설정을 로드하며, 기본값과 환경변수 override 규칙은 Go 서버와 같습니다.
+
+```
+cd samplepython && uv run python -m server.main
+```
+
+클라이언트 실행. 발급 토큰을 받은 뒤 `--verify` 로 `/verify` 왕복까지 확인합니다.
+
+```
+cd samplepython && uv run python -m client.main --verify
+```
+
+pre-signed URL 형태는 Go 클라이언트와 같은 플래그를 씁니다.
+
+```
+cd samplepython && uv run python -m client.main --form presigned --presign-expiry 1m --verify
+```
+
+로컬 데모(실 AWS 없이). Go 절과 같은 순서로 터미널 세 개를 씁니다. 목 STS 를 먼저 띄워야 서버가 그 CA 파일을 읽을 수 있습니다.
+
+터미널 1, 목 STS(TLS, 서명 미검증). 부팅 때 `mocksts-ca.pem` 을 cwd 에 생성하고 `https://localhost:8443` 에서 위임을 받습니다.
+
+```
+cd samplepython && uv run python -m server.cmd.mocksts
+```
+
+터미널 2, 서버. 목 STS URL 을 허용 목록으로, 방금 생성된 CA 파일을 `STS_CA_FILE` 로 가리킵니다.
+
+```
+cd samplepython && STS_ENDPOINT_ALLOWLIST=https://localhost:8443 STS_CA_FILE=./mocksts-ca.pem uv run python -m server.main
+```
+
+터미널 3, 클라이언트. static 자격증명으로 목 STS 를 대상으로 서명해 `/auth` 로 보내고 `--verify` 로 왕복합니다.
+
+```
+cd samplepython && uv run python -m client.main \
+  --sts-endpoint https://localhost:8443 --region us-east-1 \
+  --static-creds --static-access-key-id AKIDEXAMPLE --static-secret-key secretexamplekey \
+  --verify
+```
+
+성공하면 Go 데모와 동일하게 3 세그먼트 JWT 와 만료, 이어서 `/verify` 가 돌려준 클레임(`sub` 은 목 STS 가 돌려준 ARN `arn:aws:iam::123456789012:role/workload`)을 표준 출력에 찍습니다. pre-signed URL 형태로 돌리려면 클라이언트에 `--form presigned --presign-expiry 1m` 을 더합니다(목 STS/서버는 그대로 둡니다).
+
+개발/테스트. 포맷/린트/타입/테스트(단위 + 크로스모듈 e2e)를 한 명령으로 돌립니다.
+
+```
+cd samplepython && make check
+```
+
+`make check` 는 `uv` 위에서 ruff 포맷 검사 + ruff 린트 + mypy + pytest 를 돌리며, e2e 스위트에는 Go 와 마찬가지로 presigned 만료 상한의 클라이언트/서버 일치 가드가 들어 있습니다. 같은 스위트를 GitHub Actions(`.github/workflows/ci-python.yml`)가 push 마다 강제합니다(Go CI `.github/workflows/ci.yml` 와는 별도 잡).
 
 #### 와이어 계약 요약
 
