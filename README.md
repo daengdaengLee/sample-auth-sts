@@ -343,6 +343,13 @@ cd samplego/client && go run . --form presigned --presign-expiry 1m --verify
 
 클라이언트 `--region`과 `--sts-endpoint`는 일치해야 하며(한쪽만 주면 나머지를 파생), 커밋된 기본값은 global STS(`https://sts.amazonaws.com` + `us-east-1`)를 가리킵니다.
 
+위 세 조건을 한 번에 확인하는 스모크 스크립트가 `samplego/scripts/real-aws-smoke.sh` 에 있습니다. 실 AWS 자격증명과 STS 접근이 되는 호스트(예: EC2 인스턴스 프로파일)에서 실행하면, 서버를 환경변수 override 로 띄우고 클라이언트로 header/presigned 양성 왕복과 `arn_not_allowed`(403) 음성을 자동 판정해 리포트합니다(`arn_not_allowed` 는 실 STS 가 서명을 검증했으나 서버 ARN 게이트에서만 막혔다는 뜻이라 실 STS 연동도 함께 증명합니다). caller ARN 은 `aws sts get-caller-identity` 로 자동 조회하거나 `SMOKE_CALLER_ARN` 으로 지정합니다.
+
+```bash
+# 실 AWS 호스트에서 실행. 기본값은 global STS(us-east-1)를 씁니다.
+./samplego/scripts/real-aws-smoke.sh
+```
+
 #### 로컬 데모(실 AWS 없이)
 
 실 AWS 없이 "목 STS + 서버 + 클라이언트" 세 프로세스를 `go run` 으로 띄워 서명 -> 전송 -> 발급 -> `/verify` 왕복을 처음부터 끝까지 관통해 볼 수 있습니다. 유일한 걸림돌이던 server -> 목 STS 구간의 TLS 신뢰는, 목 STS 가 부팅 때 self-signed 인증서를 생성해 그 CA 를 파일로 내보내고 서버가 그 CA 만 추가로 신뢰(`sts.ca_file`)하게 해서 잇습니다. "지정한 CA 만 신뢰"하는 표준 TLS 방식이라 검증을 끄지 않습니다(`InsecureSkipVerify` 를 쓰지 않음). 이 CA 신뢰와 목 STS 는 오로지 데모 전용이며 실 배포에서는 쓰지 마세요(`제한 사항` 참고).
