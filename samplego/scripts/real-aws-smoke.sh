@@ -43,6 +43,10 @@
 # 종료코드: 세 체크가 모두 PASS 면 0, 하나라도 실패하면 non-zero.
 
 set -euo pipefail
+# monitor mode 를 켠다. 이러면 백그라운드 잡(아래 start_server 의 `( ... ) &`)이 각자 별도
+# 프로세스 그룹으로 뜬다(PGID == 잡 PID). go run 이 SIGTERM 을 자식(컴파일된 서버)에게
+# 전달하지 않아도, 정리 때 그룹째 신호를 보내 서버 자식까지 확실히 죽인다(고아 포트 점유 방지).
+set -m
 
 # ---- 경로 해석(cwd 의존 금지) --------------------------------------------------
 # 저장소 루트는 스크립트 위치 기준으로 잡는다: <repo>/samplego/scripts/real-aws-smoke.sh
@@ -98,25 +102,27 @@ start_server() {
 }
 
 # stop_server
-# 현재 서버 프로세스를 종료하고, 완전히 죽을 때까지 대기한다(포트 충돌 방지).
+# 현재 서버 프로세스 그룹을 종료하고, 완전히 죽을 때까지 대기한다(포트 충돌 방지).
 stop_server() {
   if [[ -z "${SERVER_PID}" ]]; then
     return 0
   fi
-  # go run 은 자식(빌드 결과 바이너리)을 띄우므로 프로세스 그룹째 정리한다.
-  kill "${SERVER_PID}" 2>/dev/null || true
-  pkill -P "${SERVER_PID}" 2>/dev/null || true
-  # 프로세스가 실제로 사라질 때까지 최대 10초 대기.
+  # go run 은 자식(빌드 결과 바이너리)을 띄우고 SIGTERM 을 안정적으로 전달하지 않으므로,
+  # PID 가 아니라 프로세스 그룹(음수 PID = -PGID)에 신호를 보내 go run 과 서버 자식을 함께 죽인다.
+  # set -m 덕분에 SERVER_PID 가 그룹 리더이자 PGID 다.
+  kill -TERM -"${SERVER_PID}" 2>/dev/null || true
+  # 그룹 리더가 실제로 사라질 때까지 최대 10초 대기, 그 뒤엔 그룹째 강제 종료.
   local waited=0
   while kill -0 "${SERVER_PID}" 2>/dev/null; do
     sleep 1
     waited=$((waited + 1))
     if [[ "${waited}" -ge 10 ]]; then
-      kill -9 "${SERVER_PID}" 2>/dev/null || true
-      pkill -9 -P "${SERVER_PID}" 2>/dev/null || true
+      kill -KILL -"${SERVER_PID}" 2>/dev/null || true
       break
     fi
   done
+  # 종료된 잡을 reap 해 좀비/잡 종료 알림 소음을 줄인다.
+  wait "${SERVER_PID}" 2>/dev/null || true
   SERVER_PID=""
 }
 
@@ -131,7 +137,7 @@ wait_health() {
       cat "${SERVER_LOG}" >&2 || true
       return 1
     fi
-    if curl -fsS -o /dev/null "${SERVER_ADDR}/healthz" 2>/dev/null; then
+    if curl -fsS --max-time 5 -o /dev/null "${SERVER_ADDR}/healthz" 2>/dev/null; then
       return 0
     fi
     sleep 1
@@ -188,6 +194,29 @@ judge_positive() {
   return 1
 }
 
+# region 과 STS 엔드포인트 정합성 검증.
+# --region 과 --sts-endpoint 가 어긋나면 SigV4 서명이 STS 에서 거부되어 양성 체크가 혼란스러운
+# 서명 오류로 FAIL 한다. 표준 AWS 공개 엔드포인트에 한해 기대 region 을 뽑아 미리 막는다.
+# 사설/비표준 엔드포인트는 검증을 생략한다(사용자 책임).
+check_region_endpoint_coherence() {
+  local host expected_region
+  host="${STS_ENDPOINT#https://}"
+  host="${host%%/*}"
+  if [[ "${host}" == "sts.amazonaws.com" ]]; then
+    expected_region="us-east-1"
+  elif [[ "${host}" =~ ^sts\.([a-z0-9-]+)\.amazonaws\.com$ ]]; then
+    expected_region="${BASH_REMATCH[1]}"
+  else
+    return 0
+  fi
+  if [[ "${REGION}" != "${expected_region}" ]]; then
+    echo "error: region 과 STS endpoint 가 정합하지 않습니다." >&2
+    echo "       endpoint=${STS_ENDPOINT} 는 region=${expected_region} 을 기대하지만 SMOKE_REGION=${REGION} 입니다." >&2
+    echo "       SMOKE_REGION 과 SMOKE_STS_ENDPOINT 를 함께 맞추세요(둘 다 기본이면 global us-east-1)." >&2
+    exit 1
+  fi
+}
+
 # stdout 의 "  sub: <ARN>" 줄에서 STS 가 돌려준 ARN 을 캡처한다(참고용).
 capture_sub_arn() {
   local line
@@ -195,6 +224,36 @@ capture_sub_arn() {
   if [[ -n "${line}" ]]; then
     CAPTURED_ARN="${line#  sub: }"
   fi
+}
+
+# print_report_and_exit
+# 세 체크 결과를 요약 출력하고, 모두 PASS 면 0, 아니면 non-zero 로 종료한다. 서버 기동 실패 등
+# 중도 이탈 경로에서도 호출해, 이미 판정된 부분 결과(양성 등)를 잃지 않고 리포트한다.
+print_report_and_exit() {
+  local log
+  echo "================ 스모크 리포트 ================"
+  echo "  체크 1/3 양성-header    : ${RESULT_HEADER}"
+  echo "  체크 2/3 양성-presigned : ${RESULT_PRESIGNED}"
+  echo "  체크 3/3 음성-403       : ${RESULT_NEGATIVE}"
+  echo "  ---------------------------------------------"
+  echo "  caller ARN(입력)        : ${CALLER_ARN}"
+  [[ -n "${CAPTURED_ARN}" ]] && echo "  STS 반환 sub(양성)      : ${CAPTURED_ARN}"
+  echo "  STS endpoint            : ${STS_ENDPOINT}"
+  echo "  region                  : ${REGION}"
+  echo "  서버 로그 파일          :"
+  for log in "${SERVER_LOGS[@]}"; do
+    echo "    - ${log}"
+  done
+  echo "=============================================="
+
+  if [[ "${RESULT_HEADER}" == "PASS" \
+     && "${RESULT_PRESIGNED}" == "PASS" \
+     && "${RESULT_NEGATIVE}" == "PASS" ]]; then
+    echo "결과: 전체 PASS"
+    exit 0
+  fi
+  echo "결과: 실패 있음(위 리포트 참고)" >&2
+  exit 1
 }
 
 # ---- 1) 프리플라이트 -----------------------------------------------------------
@@ -208,6 +267,9 @@ if ! command -v curl >/dev/null 2>&1; then
   echo "error: curl 이 PATH 에 없습니다. curl 을 설치하세요." >&2
   exit 1
 fi
+
+# region 과 STS 엔드포인트가 어긋나면 미리 명확히 실패한다(혼란스러운 SigV4 오류 방지).
+check_region_endpoint_coherence
 
 # caller ARN 확정: SMOKE_CALLER_ARN 우선, 없으면 aws CLI 로 조회.
 CALLER_ARN="${SMOKE_CALLER_ARN:-}"
@@ -234,7 +296,9 @@ echo "=== 양성 서버 기동(allowlist = caller ARN) ==="
 start_server "${CALLER_ARN}"
 if ! wait_health; then
   echo "error: 양성 서버 기동 실패." >&2
-  exit 1
+  RESULT_HEADER="FAIL(server startup)"
+  RESULT_PRESIGNED="FAIL(server startup)"
+  print_report_and_exit
 fi
 echo "  서버 준비됨. 로그: ${SERVER_LOG}"
 echo
@@ -273,7 +337,8 @@ stop_server   # 양성 서버를 완전히 종료한 뒤 같은 포트로 재기
 start_server "${NOT_ALLOWED_ARN}"
 if ! wait_health; then
   echo "error: 음성 서버 기동 실패." >&2
-  exit 1
+  RESULT_NEGATIVE="FAIL(server startup)"
+  print_report_and_exit
 fi
 
 run_client header
@@ -296,26 +361,4 @@ stop_server
 echo
 
 # ---- 6) 리포트 -----------------------------------------------------------------
-echo "================ 스모크 리포트 ================"
-echo "  체크 1/3 양성-header    : ${RESULT_HEADER}"
-echo "  체크 2/3 양성-presigned : ${RESULT_PRESIGNED}"
-echo "  체크 3/3 음성-403       : ${RESULT_NEGATIVE}"
-echo "  ---------------------------------------------"
-echo "  caller ARN(입력)        : ${CALLER_ARN}"
-[[ -n "${CAPTURED_ARN}" ]] && echo "  STS 반환 sub(양성)      : ${CAPTURED_ARN}"
-echo "  STS endpoint            : ${STS_ENDPOINT}"
-echo "  region                  : ${REGION}"
-echo "  서버 로그 파일          :"
-for log in "${SERVER_LOGS[@]}"; do
-  echo "    - ${log}"
-done
-echo "=============================================="
-
-if [[ "${RESULT_HEADER}" == "PASS" \
-   && "${RESULT_PRESIGNED}" == "PASS" \
-   && "${RESULT_NEGATIVE}" == "PASS" ]]; then
-  echo "결과: 전체 PASS"
-  exit 0
-fi
-echo "결과: 실패 있음(위 리포트 참고)" >&2
-exit 1
+print_report_and_exit
