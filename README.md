@@ -347,6 +347,8 @@ cd samplego/client && go run . --form presigned --presign-expiry 1m --verify
 
 ```bash
 # 실 AWS 호스트에서 실행. 기본값은 global STS(us-east-1)를 씁니다.
+make smoke
+# 또는 스크립트를 직접 호출:
 ./samplego/scripts/real-aws-smoke.sh
 ```
 

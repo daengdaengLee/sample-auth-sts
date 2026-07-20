@@ -6,7 +6,7 @@
 SERVER := samplego/server
 CLIENT := samplego/client
 
-.PHONY: check build vet fmt-check test test-server test-client
+.PHONY: check build vet fmt-check test test-server test-client smoke
 
 # check 는 기본 종합 타깃이다. CI 와 동일한 스위트를 순서대로 돈다.
 check: build vet fmt-check test
@@ -37,3 +37,9 @@ test-server:
 test-client:
 	cd $(CLIENT) && go test -race ./...
 	cd $(CLIENT) && go test -tags e2e -race ./internal/e2e/...
+
+# smoke 는 실 AWS 스모크(samplego/scripts/real-aws-smoke.sh)를 부른다. 실 AWS 자격증명과
+# STS 접근이 되는 호스트에서만 통과하므로 check(CI 커버리지)에는 넣지 않는다. 파라미터는
+# SMOKE_* 환경변수로 넘긴다(예: make smoke SMOKE_REGION=ap-northeast-2 SMOKE_STS_ENDPOINT=...).
+smoke:
+	./samplego/scripts/real-aws-smoke.sh
